@@ -697,9 +697,7 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>) -> Re
     println!("[INFO] 已切换 Trae IDE 到账号: {}", info.email);
 
     // 12. 自动打开 Trae IDE
-    if let Err(e) = open_trae() {
-        println!("[WARN] 自动打开 Trae IDE 失败: {}", e);
-    }
+    open_trae()?;
 
     Ok(())
 }

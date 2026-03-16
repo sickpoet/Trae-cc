@@ -33,5 +33,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/HHH9201/Trae-CC/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCMDE0ODQ4RTVDRDRGRkQKUldUOVQ4M2xTRWdCSy9FY09PMnRVMFcxNUFwRDNFR3ZnVGQ5OUI3ZFR2ajVIL3phU3JtZHdaalMK"
+    }
   }
 }
