@@ -13,7 +13,7 @@ interface AddAccountModalProps {
   canExport?: boolean;
 }
 
-type AddMode = "browser" | "register" | "more";
+type AddMode = "browser" | "browser-register" | "register" | "more";
 type MoreSubMode = "trae-ide" | "import-export" | null;
 
 // 注册进度步骤
@@ -47,8 +47,6 @@ export function AddAccountModal({
   const dropdownRef = useRef<HTMLDivElement>(null);
   
   // 浏览器登录表单状态
-  const [loginEmail, setLoginEmail] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
   const [loginProgress, setLoginProgress] = useState(0);
   const [loginStatus, setLoginStatus] = useState("");
   
@@ -131,18 +129,19 @@ export function AddAccountModal({
 
   // 浏览器自动登录
   const handleBrowserAutoLogin = async () => {
-    if (!loginEmail || !loginPassword) {
-      setError("请输入邮箱和密码");
-      return;
-    }
-
     setLoading(true);
     setError("");
     setLoginProgress(10);
     setLoginStatus("正在打开浏览器...");
 
     try {
-      const account = await api.browserAutoLogin(loginEmail, loginPassword);
+      // 第一步：打开浏览器窗口
+      await api.startBrowserLogin();
+      setLoginProgress(30);
+      setLoginStatus("请在浏览器中完成登录...");
+      
+      // 第二步：等待登录完成并获取账号
+      const account = await api.finishBrowserLogin();
       
       setLoginProgress(100);
       setLoginStatus("登录成功!");
@@ -157,8 +156,6 @@ export function AddAccountModal({
         setLoading(false);
         setLoginProgress(0);
         setLoginStatus("");
-        setLoginEmail("");
-        setLoginPassword("");
         onClose();
         onToast?.("success", `登录成功，已导入账号: ${account.email}`);
       }, 800);
@@ -202,13 +199,24 @@ export function AddAccountModal({
     }
   };
 
+  // 打开浏览器注册页面
+  const handleOpenBrowserRegister = async () => {
+    setLoading(true);
+    try {
+      await api.openBrowserRegister();
+      onToast?.("success", "已打开浏览器注册页面");
+      handleClose();
+    } catch (err: any) {
+      setError(err.message || "打开注册页面失败");
+      setLoading(false);
+    }
+  };
+
   const handleClose = () => {
     setError("");
     setMode("browser");
     setMoreSubMode(null);
     setShowMoreDropdown(false);
-    setLoginEmail("");
-    setLoginPassword("");
     setLoginProgress(0);
     setLoginStatus("");
     stopProgressSimulation();
@@ -316,6 +324,20 @@ export function AddAccountModal({
             浏览器登录
           </button>
           
+          {/* 浏览器注册按钮 */}
+          <button
+            className={`mode-tab ${mode === "browser-register" ? "active" : ""}`}
+            onClick={() => setMode("browser-register")}
+            disabled={loading}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
+            浏览器注册
+          </button>
+          
           {/* 快速注册按钮 */}
           <button
             className={`mode-tab ${mode === "register" ? "active" : ""}`}
@@ -338,65 +360,9 @@ export function AddAccountModal({
                 <line x1="2" y1="12" x2="22" y2="12" />
                 <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
               </svg>
-              <h3>浏览器自动登录</h3>
-              <p>输入账号密码后，后台自动打开浏览器完成登录</p>
+              <h3>浏览器登录</h3>
+              <p>打开 Trae 官网登录页面，登录成功后自动导入</p>
             </div>
-
-            {/* 登录表单 */}
-            {!loading && (
-              <div className="login-form" style={{ padding: '0 24px 20px' }}>
-                <div className="form-group" style={{ marginBottom: '16px' }}>
-                  <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                    邮箱地址
-                  </label>
-                  <input
-                    type="email"
-                    value={loginEmail}
-                    onChange={(e) => setLoginEmail(e.target.value)}
-                    placeholder="请输入邮箱"
-                    disabled={loading}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg-input)',
-                      color: 'var(--text-primary)',
-                      fontSize: '14px',
-                      outline: 'none',
-                      transition: 'border-color 0.2s'
-                    }}
-                    onFocus={(e) => e.currentTarget.style.borderColor = 'var(--accent)'}
-                    onBlur={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
-                  />
-                </div>
-                <div className="form-group">
-                  <label style={{ display: 'block', marginBottom: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                    密码
-                  </label>
-                  <input
-                    type="password"
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    placeholder="请输入密码"
-                    disabled={loading}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border)',
-                      background: 'var(--bg-input)',
-                      color: 'var(--text-primary)',
-                      fontSize: '14px',
-                      outline: 'none',
-                      transition: 'border-color 0.2s'
-                    }}
-                    onFocus={(e) => e.currentTarget.style.borderColor = 'var(--accent)'}
-                    onBlur={(e) => e.currentTarget.style.borderColor = 'var(--border)'}
-                  />
-                </div>
-              </div>
-            )}
 
             {/* 进度显示 */}
             {loading && loginProgress > 0 && (
@@ -424,9 +390,38 @@ export function AddAccountModal({
                 type="button" 
                 className="primary" 
                 onClick={handleBrowserAutoLogin} 
-                disabled={loading || !loginEmail || !loginPassword}
+                disabled={loading}
               >
-                {loading ? "正在登录..." : "开始登录"}
+                {loading ? "等待登录..." : "打开登录页面"}
+              </button>
+            </div>
+          </div>
+        ) : mode === "browser-register" ? (
+          <div className="trae-ide-mode">
+            <div className="mode-description" style={{ minHeight: 'auto', padding: '24px' }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+              <h3>浏览器注册</h3>
+              <p>直接打开 Trae 注册页面，手动完成注册</p>
+            </div>
+
+            {error && <div className="error-message" style={{ margin: '0 24px 16px' }}>{error}</div>}
+
+            <div className="modal-actions">
+              <button type="button" onClick={handleClose} disabled={loading}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={handleOpenBrowserRegister}
+                disabled={true}
+                title="功能暂不可用"
+              >
+                打开注册页面
               </button>
             </div>
           </div>

@@ -51,6 +51,11 @@ export async function browserAutoLogin(email: string, password: string): Promise
   return invokeNetwork("browser_auto_login_command", { email, password });
 }
 
+// 打开浏览器注册页面
+export async function openBrowserRegister(): Promise<void> {
+  return invoke("open_browser_register");
+}
+
 // 下载并运行更新安装包（Windows: .msi）
 export async function downloadAndRunInstaller(url: string): Promise<string> {
   return invokeNetwork("download_and_run_installer", { url });

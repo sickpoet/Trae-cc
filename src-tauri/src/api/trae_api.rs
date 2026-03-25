@@ -215,21 +215,32 @@ impl TraeApiClient {
     }
 
     fn parse_jwt_token(token: &str) -> Result<JwtPayload> {
-        let parts: Vec<&str> = token.split('.').collect();
+        // URL 解码 token（如果它被编码了）
+        let decoded_token = urlencoding::decode(token)
+            .map_err(|e| anyhow!("URL 解码 token 失败: {}", e))?
+            .to_string();
+        
+        let parts: Vec<&str> = decoded_token.split('.').collect();
         if parts.len() != 3 {
-            return Err(anyhow!("无效的 JWT Token 格式"));
+            return Err(anyhow!("无效的 JWT Token 格式，包含 {} 个部分", parts.len()));
         }
 
         let payload_b64 = parts[1];
+        println!("[parse_jwt_token] Payload base64 长度: {}", payload_b64.len());
+        
         let padding = (4 - payload_b64.len() % 4) % 4;
         let padded = format!("{}{}", payload_b64, "=".repeat(padding));
         let standard_b64 = padded.replace('-', "+").replace('_', "/");
+        
+        println!("[parse_jwt_token] 标准 base64 长度: {}", standard_b64.len());
 
         let payload_bytes = BASE64.decode(&standard_b64)
-            .map_err(|e| anyhow!("解码 JWT payload 失败: {}", e))?;
+            .map_err(|e| anyhow!("解码 JWT payload 失败: {}，输入: {}", e, &standard_b64[..standard_b64.len().min(50)]))?;
 
         let payload_str = String::from_utf8(payload_bytes)
             .map_err(|e| anyhow!("JWT payload 不是有效的 UTF-8: {}", e))?;
+        
+        println!("[parse_jwt_token] Payload JSON: {}", &payload_str[..payload_str.len().min(100)]);
 
         let payload: JwtPayloadRaw = serde_json::from_str(&payload_str)
             .map_err(|e| anyhow!("解析 JWT payload 失败: {}", e))?;

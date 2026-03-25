@@ -897,6 +897,9 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                         let _ = tx.send(());
                     }
                     let _ = session.webview.close();
+                    // 清理 browser_login 状态
+                    let mut browser_login = state.browser_login.lock().await;
+                    *browser_login = None;
                     return Err(anyhow::anyhow!("浏览器登录已取消").into());
                 }
             }
@@ -907,6 +910,9 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                 let _ = tx.send(());
             }
             let _ = session.webview.close();
+            // 清理 browser_login 状态
+            let mut browser_login = state.browser_login.lock().await;
+            *browser_login = None;
             return Err(anyhow::anyhow!("浏览器登录已取消").into());
         }
         _ = session.window_close => {
@@ -914,6 +920,9 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
             if let Some(tx) = session.shutdown.lock().unwrap().take() {
                 let _ = tx.send(());
             }
+            // 清理 browser_login 状态
+            let mut browser_login = state.browser_login.lock().await;
+            *browser_login = None;
             return Err(anyhow::anyhow!("浏览器被主动关闭").into());
         }
         _ = tokio::time::sleep(Duration::from_secs(300)) => {
@@ -922,6 +931,9 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                 let _ = tx.send(());
             }
             let _ = session.webview.close();
+            // 清理 browser_login 状态
+            let mut browser_login = state.browser_login.lock().await;
+            *browser_login = None;
             return Err(anyhow::anyhow!("等待浏览器登录超时").into());
         }
     };
@@ -1000,7 +1012,9 @@ async fn cancel_browser_login(app: AppHandle, state: State<'_, AppState>) -> Res
             let _ = tx.send(());
         }
         let _ = session.webview.destroy();
-    } else if let Some(window) = app.get_webview_window("trae-login") {
+    }
+    // 关闭自动登录窗口（如果存在）
+    if let Some(window) = app.get_webview_window("auto_login") {
         let _ = window.destroy();
     }
     Ok(())
@@ -1015,6 +1029,28 @@ async fn browser_auto_login_command(
 ) -> Result<Account> {
     println!("[browser-auto-login-command] 收到自动登录请求");
     browser_auto_login::browser_auto_login(app, email, password, &state).await.map_err(|e| e.into())
+}
+
+#[tauri::command]
+async fn open_browser_register(app: AppHandle) -> Result<()> {
+    println!("[open-browser-register] 打开浏览器注册页面");
+    
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    
+    let window = WebviewWindowBuilder::new(
+        &app,
+        "browser_register",
+        WebviewUrl::External("https://www.trae.ai/sign-up".parse().unwrap()),
+    )
+    .title("Trae 注册")
+    .inner_size(1000.0, 750.0)
+    .visible(true)
+    .center()
+    .build()
+    .map_err(|e| ApiError::from(anyhow::Error::new(e)))?;
+    
+    println!("[open-browser-register] 浏览器窗口已创建");
+    Ok(())
 }
 
 #[tauri::command]
@@ -1662,6 +1698,7 @@ pub fn run() {
             finish_browser_login,
             cancel_browser_login,
             browser_auto_login_command,
+            open_browser_register,
             remove_account,
             get_accounts,
             get_account,

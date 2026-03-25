@@ -1,6 +1,7 @@
 //! TempMail.cn 客户端模块
 //!
-//! 这个模块使用 Socket.io 连接 tempmail.cn 来获取临时邮箱和接收验证码
+//! 这个模块使用 Python Socket.io 客户端连接 tempmail.cn 来获取临时邮箱和接收验证码
+//! 需要用户安装 Python 和 python-socketio 库
 
 use std::time::Duration;
 use tokio::time::timeout;
@@ -145,6 +146,34 @@ except Exception as e:
 
     println!("[TempMailClient] 启动 Python Socket.io 客户端...");
 
+    // 首先检查 Python 是否可用
+    let python_check = Command::new("python")
+        .arg("--version")
+        .output()
+        .await;
+    
+    if python_check.is_err() {
+        return Err(anyhow::anyhow!(
+            "未找到 Python。请安装 Python 3.x 并确保 'python' 命令可用。\n\
+            安装说明: https://www.python.org/downloads/"
+        ));
+    }
+
+    // 检查 socketio 库是否安装
+    let socketio_check = Command::new("python")
+        .arg("-c")
+        .arg("import socketio; print('socketio OK')")
+        .output()
+        .await;
+    
+    if socketio_check.is_err() || 
+       String::from_utf8_lossy(&socketio_check.as_ref().unwrap().stdout).trim() != "socketio OK" {
+        return Err(anyhow::anyhow!(
+            "未找到 python-socketio 库。请运行以下命令安装:\n\
+            pip install python-socketio"
+        ));
+    }
+
     let child = Command::new("python")
         .arg("-c")
         .arg(&python_script)
@@ -152,7 +181,10 @@ except Exception as e:
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| anyhow::anyhow!("无法启动 Python: {}", e))?;
+        .map_err(|e| anyhow::anyhow!(
+            "无法启动 Python: {}\n\
+            请确保 Python 已正确安装并添加到系统 PATH。", e
+        ))?;
 
     let result = timeout(timeout_duration + Duration::from_secs(5), async {
         let output = child.wait_with_output().await
@@ -167,7 +199,13 @@ except Exception as e:
             }
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!("Python 脚本失败: {}", stderr))
+            if stderr.contains("No module named") {
+                Err(anyhow::anyhow!(
+                    "缺少 Python 依赖。请运行: pip install python-socketio"
+                ))
+            } else {
+                Err(anyhow::anyhow!("Python 脚本失败: {}", stderr))
+            }
         }
     }).await;
 
@@ -191,15 +229,5 @@ pub fn generate_password() -> String {
         })
         .collect();
 
-    println!("[TempMailClient] 生成随机密码: {}******", &password[..3]);
     password
-}
-
-/// 等待验证码（兼容旧接口）
-pub async fn wait_for_verification_code(
-    client: &mut TempMailClient,
-    _email: &str,
-    timeout: Duration
-) -> anyhow::Result<String> {
-    client.wait_for_code(timeout).await
 }

@@ -285,6 +285,9 @@ export function Settings({
               <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginLeft: '16px', marginTop: '4px' }}>
                 Windows 用户还需手动删除：C:\Users\[用户名]\.trae\ 等文件夹
               </div>
+              <div style={{ fontSize: '13px', color: '#ff4d4f', marginLeft: '16px', marginTop: '8px', fontWeight: 500 }}>
+                提示：免费账户达到上限，请升级至专业版，手动点击清除登录状态，并查看清除后的提示
+              </div>
             </div>
           </div>
           <div className="setting-action" style={{ display: 'flex', alignItems: 'flex-start', paddingTop: '32px', marginLeft: '16px' }}>

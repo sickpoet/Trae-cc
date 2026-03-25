@@ -661,6 +661,11 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
         .map_err(|e| anyhow!("创建目录失败: {}", e))?;
     let storage_path = storage_dir.join("storage.json");
 
+    // 生成新的 telemetry ID
+    let new_dev_device_id = Uuid::new_v4().to_string();
+    let new_sqm_id = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
+    let new_telemetry_machine_id = generate_telemetry_machine_id(&new_machine_id);
+
     // 读取现有配置或创建新的
     let mut json: serde_json::Value = if storage_path.exists() {
         let content = fs::read_to_string(&storage_path)
@@ -679,8 +684,10 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     obj.remove("iCubeServerData://icube.cloudide");
     obj.remove("iCubeAuthInfo://usertag");
 
-    // 注意：不在这里更新 telemetry ID，因为 Trae 启动时会根据 machineid 文件重新生成
-    // 我们只需要确保 machineid 文件正确即可
+    // 更新 telemetry ID
+    obj.insert("telemetry.devDeviceId".to_string(), serde_json::json!(new_dev_device_id));
+    obj.insert("telemetry.machineId".to_string(), serde_json::json!(new_telemetry_machine_id));
+    obj.insert("telemetry.sqmId".to_string(), serde_json::json!(new_sqm_id));
 
     // 写回文件
     let new_content = serde_json::to_string_pretty(&json)
@@ -714,7 +721,13 @@ pub fn clear_trae_login_state() -> Result<()> {
         .map_err(|e| anyhow!("重置 Trae 机器码失败: {}", e))?;
     println!("[INFO] 已重置 Trae 机器码: {}", new_machine_id);
 
-    // 2. 清除 storage.json 中的登录信息
+    // 2. 生成新的 telemetry ID
+    let new_dev_device_id = Uuid::new_v4().to_string();
+    let new_sqm_id = format!("{{{}}}", Uuid::new_v4().to_string().to_uppercase());
+    // machineId 是 machineid 文件的哈希（64位十六进制字符串）
+    let new_telemetry_machine_id = generate_telemetry_machine_id(&new_machine_id);
+
+    // 3. 更新 storage.json 中的登录信息和 telemetry ID
     let storage_path = trae_path.join("User").join("globalStorage").join("storage.json");
     if storage_path.exists() {
         let content = fs::read_to_string(&storage_path)
@@ -729,19 +742,22 @@ pub fn clear_trae_login_state() -> Result<()> {
                 obj.remove("iCubeServerData://icube.cloudide");
                 obj.remove("iCubeAuthInfo://usertag");
 
-                // 注意：不重置 telemetry ID，因为 Trae 启动时会根据 machineid 文件重新生成
+                // 更新 telemetry ID
+                obj.insert("telemetry.devDeviceId".to_string(), serde_json::json!(new_dev_device_id));
+                obj.insert("telemetry.machineId".to_string(), serde_json::json!(new_telemetry_machine_id));
+                obj.insert("telemetry.sqmId".to_string(), serde_json::json!(new_sqm_id));
 
                 // 写回文件
                 let new_content = serde_json::to_string_pretty(&json)
                     .map_err(|e| anyhow!("序列化 JSON 失败: {}", e))?;
                 fs::write(&storage_path, new_content)
                     .map_err(|e| anyhow!("写入 storage.json 失败: {}", e))?;
-                println!("[INFO] 已清除 storage.json 中的登录信息");
+                println!("[INFO] 已清除 storage.json 中的登录信息并更新 telemetry ID");
             }
         }
     }
 
-    // 3. 删除 state.vscdb 数据库（包含更多登录状态）
+    // 4. 删除 state.vscdb 数据库（包含更多登录状态）
     let state_db_path = trae_path.join("User").join("globalStorage").join("state.vscdb");
     if state_db_path.exists() {
         fs::remove_file(&state_db_path)
@@ -749,42 +765,42 @@ pub fn clear_trae_login_state() -> Result<()> {
         println!("[INFO] 已删除 state.vscdb");
     }
 
-    // 4. 删除 state.vscdb.backup
+    // 5. 删除 state.vscdb.backup
     let state_db_backup_path = trae_path.join("User").join("globalStorage").join("state.vscdb.backup");
     if state_db_backup_path.exists() {
         let _ = fs::remove_file(&state_db_backup_path);
         println!("[INFO] 已删除 state.vscdb.backup");
     }
 
-    // 5. 清除 Local State 中的加密密钥
+    // 6. 清除 Local State 中的加密密钥
     let local_state_path = trae_path.join("Local State");
     if local_state_path.exists() {
         let _ = fs::remove_file(&local_state_path);
         println!("[INFO] 已删除 Local State");
     }
 
-    // 6. 清除 IndexedDB（可能包含登录缓存）
+    // 7. 清除 IndexedDB（可能包含登录缓存）
     let indexed_db_path = trae_path.join("IndexedDB");
     if indexed_db_path.exists() {
         let _ = fs::remove_dir_all(&indexed_db_path);
         println!("[INFO] 已清除 IndexedDB");
     }
 
-    // 7. 清除 Local Storage
+    // 8. 清除 Local Storage
     let local_storage_path = trae_path.join("Local Storage");
     if local_storage_path.exists() {
         let _ = fs::remove_dir_all(&local_storage_path);
         println!("[INFO] 已清除 Local Storage");
     }
 
-    // 8. 清除 Session Storage
+    // 9. 清除 Session Storage
     let session_storage_path = trae_path.join("Session Storage");
     if session_storage_path.exists() {
         let _ = fs::remove_dir_all(&session_storage_path);
         println!("[INFO] 已清除 Session Storage");
     }
 
-    // 9. 清除 Cookies
+    // 10. 清除 Cookies
     let cookies_path = trae_path.join("Network").join("Cookies");
     if cookies_path.exists() {
         let _ = fs::remove_file(&cookies_path);
@@ -808,6 +824,18 @@ fn md5_hash(input: &str) -> u128 {
     let h2 = hasher2.finish();
 
     ((h1 as u128) << 64) | (h2 as u128)
+}
+
+/// 生成 telemetry.machineId（64位十六进制字符串）
+fn generate_telemetry_machine_id(machine_id: &str) -> String {
+    use sha2::{Sha256, Digest};
+
+    let mut hasher = Sha256::new();
+    hasher.update(machine_id.as_bytes());
+    let result = hasher.finalize();
+
+    // 将前32字节转换为64位十六进制字符串
+    hex::encode(&result[..32])
 }
 
 // macOS 平台实现
