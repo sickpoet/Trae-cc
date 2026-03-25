@@ -185,12 +185,12 @@ export function AddAccountModal({
       
       // 延迟关闭弹窗，让用户看到完成状态
       setTimeout(() => {
+        // 先显示成功提示
+        onToast?.("success", `注册成功，已导入账号: ${account.email}`);
         // 重置状态并关闭
         setLoading(false);
         stopProgressSimulation();
         onClose();
-        // 显示成功提示
-        onToast?.("success", `注册成功，已导入账号: ${account.email}`);
       }, 800);
     } catch (err: any) {
       setError(err.message || "快速注册失败");

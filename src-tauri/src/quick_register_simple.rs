@@ -33,6 +33,13 @@ pub async fn quick_register_simple(
     // 初始化 TempMailClient
     println!("[quick-register-simple] 初始化 TempMailClient...");
     let mut mail_client = TempMailClient::new();
+    
+    // 初始化并解压嵌入式可执行文件
+    if let Err(e) = mail_client.init().await {
+        println!("[quick-register-simple] TempMailClient 初始化失败: {}", e);
+        return Err(ApiError::from(anyhow!("初始化临时邮箱客户端失败: {}", e)));
+    }
+    
     let password = generate_password();
     let email = mail_client.generate_email().await;
     
