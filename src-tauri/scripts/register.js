@@ -139,60 +139,42 @@
       sendLog('❌ setValue失败: 输入框为空');
       return false;
     }
-    
-    sendLog('📝 开始设置输入框值:');
-    sendLog('   - 输入框类型: ' + input.type);
-    sendLog('   - 输入框名称: ' + (input.name || '无'));
-    sendLog('   - 输入框placeholder: ' + (input.placeholder || '无'));
-    sendLog('   - 目标值长度: ' + value.length);
-    sendLog('   - 当前值: ' + (input.value ? input.value.substring(0, 20) + '...' : '空'));
-    
+
+    // 如果值已经相同，直接返回成功
+    if (input.value === value) {
+      return true;
+    }
+
+    sendLog('📝 设置输入框值: ' + (input.name || input.placeholder || 'unnamed') + ' = ' + value.substring(0, 20) + (value.length > 20 ? '...' : ''));
+
     // 聚焦输入框
-    sendLog('   - 步骤1: 聚焦输入框');
     input.focus();
-    input.click();
-    
-    // 直接设置 value
-    sendLog('   - 步骤2: 直接设置value属性');
-    input.value = value;
-    
+
+    // 使用更现代的方式设置值
+    const proto = Object.getPrototypeOf(input);
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) {
+      setter.call(input, value);
+    } else {
+      input.value = value;
+    }
+
     // 触发 React 的 valueTracker
-    sendLog('   - 步骤3: 触发React valueTracker');
     const tracker = input._valueTracker;
     if (tracker) {
       tracker.setValue('');
-      sendLog('     ✓ valueTracker已触发');
-    } else {
-      sendLog('     ⚠️ 未找到valueTracker');
     }
-    
-    // 触发所有必要的事件
-    sendLog('   - 步骤4: 触发DOM事件');
-    const events = ["focus", "input", "change", "blur"];
-    events.forEach(eventType => {
-      const event = new Event(eventType, { bubbles: true, cancelable: true });
-      input.dispatchEvent(event);
-    });
-    sendLog('     ✓ 事件已触发: ' + events.join(', '));
-    
-    // 模拟键盘输入
-    sendLog('   - 步骤5: 模拟键盘输入 (' + value.length + '个字符)');
-    for (let i = 0; i < value.length; i++) {
-      const char = value[i];
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keypress', { key: char, charCode: char.charCodeAt(0), bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent('keyup', { key: char, code: 'Key' + char.toUpperCase(), bubbles: true }));
-    }
-    
-    // 最后触发 blur
-    sendLog('   - 步骤6: 触发blur事件');
-    input.blur();
-    
+
+    // 触发必要的事件（简化版）
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
     // 验证结果
     const success = input.value === value;
-    sendLog('   - 设置结果: ' + (success ? '✅ 成功' : '❌ 失败'));
-    sendLog('   - 设置后值: ' + (input.value ? input.value.substring(0, 30) + '...' : '空'));
-    
+    if (!success) {
+      sendLog('   ⚠️ 设置失败，当前值: ' + input.value);
+    }
+
     return success;
   };
 
@@ -303,18 +285,43 @@
     return found || null;
   };
 
-  const runWithRetry = (fn, maxTries = 40) => {
+  const runWithRetry = (fn, maxTries = 60) => {
     sendLog('🔄 开始重试执行，最大次数: ' + maxTries);
     let tries = 0;
-    const timer = setInterval(() => {
+    const startTime = Date.now();
+
+    const tryExecute = () => {
       tries += 1;
-      sendLog('   - 第 ' + tries + ' 次尝试...');
       const ok = fn();
-      if (ok || tries >= maxTries) {
-        sendLog('   - 重试结束: ' + (ok ? '成功' : '达到最大次数'));
+
+      if (ok) {
+        sendLog('   - 重试成功，共尝试 ' + tries + ' 次');
+        clearInterval(timer);
+        return;
+      }
+
+      // 如果已经运行超过 30 秒，强制结束
+      if (Date.now() - startTime > 30000) {
+        sendLog('   - 重试超时(30秒)，结束执行');
+        clearInterval(timer);
+        return;
+      }
+
+      if (tries >= maxTries) {
+        sendLog('   - 达到最大重试次数，结束执行');
         clearInterval(timer);
       }
-    }, 500);
+    };
+
+    // 立即执行第一次
+    tryExecute();
+
+    // 使用动态间隔：前10次快速重试(100ms)，之后减慢(200ms)
+    let interval = 100;
+    const timer = setInterval(() => {
+      if (tries > 10) interval = 200;
+      tryExecute();
+    }, interval);
   };
 
   const findTextNodeElement = (labels) => {
@@ -694,80 +701,36 @@
 
       if (btn) {
         const btnText = (btn.innerText || btn.textContent || "").trim();
-        sendLog('');
-        sendLog('✅ 最终确认使用按钮:');
-        sendLog('   - 文本: "' + btnText + '"');
-        sendLog('   - disabled: ' + btn.disabled);
-        sendLog('   - className: ' + btn.className);
-        sendLog('   - tagName: ' + btn.tagName);
-        
+
         // 检查按钮状态
         if (/\d+s/.test(btnText) || btnText.includes("已发送") || btnText.includes("resend") || btnText.includes("Resend")) {
-           sendLog('   ⏱️ 按钮显示倒计时或已发送状态，标记为已点击');
            hasClickedSendCode = true;
            return true;
         }
 
-        sendLog('');
-        sendLog('🖱️ 开始点击按钮...');
+        sendLog('🖱️ 点击按钮: "' + btnText.substring(0, 30] + '"');
 
         // 确保按钮可交互
         if (btn.disabled) {
-          sendLog('   按钮被禁用，尝试启用...');
           btn.disabled = false;
           btn.removeAttribute('disabled');
         }
 
-        // 滚动到按钮位置（确保在视口内）
-        sendLog('   - 滚动到按钮位置');
+        // 滚动到按钮位置并点击
         btn.scrollIntoView({ behavior: 'instant', block: 'center' });
 
-        sendLog('   - 分发鼠标事件序列...');
-        
-        // 完整的鼠标事件序列
-        const mouseEvents = [
-          new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window }),
-          new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window }),
-          new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, button: 0 }),
-          new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, button: 0 }),
-          new MouseEvent("click", { bubbles: true, cancelable: true, view: window, button: 0 })
-        ];
-        
-        mouseEvents.forEach((event, index) => {
-          sendLog('     事件 ' + (index + 1) + '/' + mouseEvents.length + ': ' + event.type);
-          btn.dispatchEvent(event);
-        });
-        
-        // 直接调用 click 方法
-        sendLog('   - 直接调用 click() 方法');
+        // 简化的点击事件序列
+        btn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window, button: 0 }));
+        btn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window, button: 0 }));
         btn.click();
-        
-        // 触发表单提交（如果按钮在表单内）
-        const form = btn.closest('form');
-        if (form) {
-          sendLog('   - 触发表单相关事件');
-          form.dispatchEvent(new Event('input', { bubbles: true }));
-          form.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        
-        sendLog('✅ 主要点击事件完成');
-        
+
         // 标记为已点击
         hasClickedSendCode = true;
-        sendLog('🔘 已设置 hasClickedSendCode = true');
 
-        // 多次重试点击
-        const retryDelays = [100, 300, 500, 800, 1000];
-        retryDelays.forEach((delay, index) => {
-          setTimeout(() => {
-            sendLog('⏱️ 延迟' + delay + 'ms后第' + (index + 1) + '次重试点击');
-            if (btn && !btn.disabled) {
-              btn.click();
-              btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-            }
-          }, delay);
-        });
-        
+        // 减少重试次数和间隔
+        setTimeout(() => { if (btn && !btn.disabled) btn.click(); }, 200);
+        setTimeout(() => { if (btn && !btn.disabled) btn.click(); }, 500);
+
         return true;
       }
 
@@ -907,70 +870,41 @@
       }
 
       // 查找注册按钮
-      sendLog('   查找注册按钮...');
       const signUpSelectors = [
-        // 基于用户提供的HTML结构
-        ".sc-gEvEer.fQLTLP.btn-submit",
-        ".btn-submit.btn-large.trae__btn",
-        ".sc-gEvEer .content:contains('Sign Up')",
-        // 通用选择器
         ".btn-submit",
         ".trae__btn",
-        ".btn-large",
-        ".btn-submit.trae__btn",
         "button[type='submit']",
         "button.btn-primary",
-        "button.primary",
-        "button[class*='submit']",
-        "button[class*='primary']",
-        // 基于文本
-        "div:contains('Sign Up')",
-        ".content:contains('Sign Up')"
+        "button[class*='submit']"
       ];
-      
+
       let submitBtn = null;
       for (const selector of signUpSelectors) {
-        sendLog('     - 尝试: ' + selector);
         const btn = document.querySelector(selector);
         if (btn && isVisible(btn)) {
           submitBtn = btn;
-          sendLog('     ✅ 找到按钮: ' + selector);
           break;
         }
       }
 
       if (!submitBtn) {
-        sendLog('   - 通过文本查找...');
-        submitBtn = findClickableByText(["sign up", "register", "create account", "注册", "创建账号"], document);
+        submitBtn = findClickableByText(["sign up", "register", "注册"], document);
       }
 
       if (submitBtn) {
-        const btnText = (submitBtn.innerText || submitBtn.textContent || "").trim();
-        sendLog('   ✅ 找到注册按钮: "' + btnText.substring(0, 30) + '"');
-        sendLog('   🖱️ 开始点击...');
-        
+        sendLog('   🖱️ 点击注册按钮');
         submitBtn.focus();
-        submitBtn.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-        submitBtn.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
         submitBtn.click();
-        submitBtn.dispatchEvent(new Event("click", { bubbles: true }));
-        
-        sendLog('   ✅ 点击完成');
-        
-        setTimeout(() => {
-          sendLog('   ⏱️ 延迟300ms后再次点击');
-          submitBtn.click();
-        }, 300);
-        setTimeout(() => {
-          sendLog('   ⏱️ 延迟800ms后第三次点击');
-          submitBtn.click();
-        }, 800);
+
+        // 减少重试次数
+        setTimeout(() => submitBtn.click(), 200);
+        setTimeout(() => submitBtn.click(), 500);
       } else {
         sendLog('   ❌ 未找到注册按钮');
       }
     };
 
-    setTimeout(clickSubmitButton, 300);
+    setTimeout(clickSubmitButton, 200);
     
     sendLog('');
     sendLog('========================================');

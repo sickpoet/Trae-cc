@@ -313,7 +313,7 @@ export function AddAccountModal({
         <div className="add-mode-tabs">
           <button
             className={`mode-tab ${mode === "browser" ? "active" : ""}`}
-            onClick={() => setMode("browser")}
+            onClick={() => { setMode("browser"); setError(""); }}
             disabled={loading}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -327,7 +327,7 @@ export function AddAccountModal({
           {/* 浏览器注册按钮 */}
           <button
             className={`mode-tab ${mode === "browser-register" ? "active" : ""}`}
-            onClick={() => setMode("browser-register")}
+            onClick={() => { setMode("browser-register"); setError(""); }}
             disabled={loading}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -341,7 +341,7 @@ export function AddAccountModal({
           {/* 快速注册按钮 */}
           <button
             className={`mode-tab ${mode === "register" ? "active" : ""}`}
-            onClick={() => setMode("register")}
+            onClick={() => { setMode("register"); setError(""); }}
             disabled={loading}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

@@ -13,6 +13,7 @@ import { ConfirmModal } from "./components/ConfirmModal";
 import { Stats } from "./pages/Stats";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
+
 import * as api from "./api";
 import type { Account, AccountBrief, AppSettings, UsageSummary } from "./types";
 import "./App.css";

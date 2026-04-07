@@ -34,6 +34,14 @@ export async function quickRegister(showWindow?: boolean): Promise<Account> {
   return invokeNetwork("quick_register");
 }
 
+// 使用自定义临时邮箱进行快速注册
+export async function quickRegisterWithCustomTempMail(showWindow?: boolean): Promise<Account> {
+  if (typeof showWindow === "boolean") {
+    return invokeNetwork("quick_register_with_custom_tempmail", { showWindow });
+  }
+  return invokeNetwork("quick_register_with_custom_tempmail");
+}
+
 export async function startBrowserLogin(): Promise<void> {
   return invokeNetwork("start_browser_login");
 }
@@ -249,18 +257,6 @@ export async function getUserStatistics(accountId: string): Promise<UserStatisti
 // 打开购买页面（内置浏览器，携带账号 Cookies）
 export async function openPricing(accountId: string): Promise<void> {
   return invokeNetwork("open_pricing", { accountId });
-}
-
-// ============ 更新相关 API ============
-
-// 检查更新
-export async function checkUpdate(): Promise<{ version: string; current_version: string; body: string; date: string } | null> {
-  return invoke("check_update");
-}
-
-// 安装更新
-export async function installUpdate(): Promise<void> {
-  return invoke("install_update");
 }
 
 // ============ 日志相关 API ============

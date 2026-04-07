@@ -3,7 +3,7 @@
 use std::time::Duration;
 use anyhow::anyhow;
 use reqwest::Url;
-use tauri::{AppHandle, Manager, State, WebviewUrl};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WindowEvent};
 use tauri::webview::WebviewWindowBuilder;
 use tokio::sync::oneshot;
 use warp::Filter;
@@ -53,8 +53,12 @@ pub async fn quick_register_simple(
     // 启动本地回调服务器（用于接收 JS 拦截的 Token）
     let (token_tx, token_rx) = oneshot::channel::<(String, String)>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (window_close_tx, window_close_rx) = oneshot::channel::<()>();
+    let (window_close_tx2, window_close_rx2) = oneshot::channel::<()>();
     let token_sender = Arc::new(StdMutex::new(Some(token_tx)));
     let shutdown_sender = Arc::new(StdMutex::new(Some(shutdown_tx)));
+    let window_close_sender = Arc::new(StdMutex::new(Some(window_close_tx)));
+    let window_close_sender2 = Arc::new(StdMutex::new(Some(window_close_tx2)));
 
     let token_sender_route = token_sender.clone();
     let shutdown_sender_route = shutdown_sender.clone();
@@ -135,22 +139,52 @@ pub async fn quick_register_simple(
         .build()
         .map_err(|e| ApiError::from(anyhow!("无法打开注册窗口: {}", e)))?;
 
+    // 监听窗口关闭事件
+    let window_close_sender_clone = window_close_sender.clone();
+    let window_close_sender_clone2 = window_close_sender2.clone();
+    webview.on_window_event(move |event| {
+        if let WindowEvent::Destroyed = event {
+            println!("[quick-register-simple] 浏览器窗口被关闭");
+            if let Some(tx) = window_close_sender_clone.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if let Some(tx) = window_close_sender_clone2.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        }
+    });
+
     // 清除浏览数据并导航到注册页面
     let _ = webview.clear_all_browsing_data();
     let _ = webview.navigate(Url::parse("https://www.trae.ai/sign-up").unwrap());
-    let _ = webview.eval(helper_script);
 
-    // 等待验证码邮件
+    // 等待页面加载完成后再执行脚本
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let _ = webview.eval(helper_script.clone());
+    let _ = webview.eval(format!(
+        "if (window.__traeAutoRegister) {{ window.__traeAutoRegister.start({}); }}",
+        serde_json::to_string(&email).unwrap_or_else(|_| "\"\"".to_string())
+    ));
+
+    // 等待验证码邮件（同时监听窗口关闭）
     println!("[quick-register-simple] 等待验证码邮件...");
-    let code = match mail_client.wait_for_code(Duration::from_secs(60)).await {
-        Ok(code) => code,
-        Err(err) => {
-            let _ = webview.close();
-            return Err(ApiError::from(err));
+    let code = tokio::select! {
+        result = mail_client.wait_for_code(Duration::from_secs(60)) => {
+            match result {
+                Ok(code) => {
+                    println!("[quick-register-simple] 获取验证码: {}", code);
+                    code
+                }
+                Err(err) => {
+                    let _ = webview.close();
+                    return Err(ApiError::from(err));
+                }
+            }
+        }
+        _ = window_close_rx => {
+            return Err(ApiError::from(anyhow!("浏览器窗口被关闭，注册取消")));
         }
     };
-    
-    println!("[quick-register-simple] 获取验证码: {}", code);
 
     // 填入验证码和密码
     *pending_completion.lock().unwrap() = Some((code.clone(), password.clone()));
@@ -161,14 +195,21 @@ pub async fn quick_register_simple(
         code_js, password_js
     ));
 
-    // 等待 token 拦截
+    // 等待 token 拦截（同时监听窗口关闭）
     println!("[quick-register-simple] 等待登录完成 (token 拦截)...");
-    let (token, url) = match token_rx.await {
-        Ok(res) => res,
-        Err(_) => {
-            println!("[quick-register-simple] Token 等待超时或失败");
-            let _ = webview.close();
-            return Err(ApiError::from(anyhow!("等待 Token 超时或失败")));
+    let (token, url) = tokio::select! {
+        result = token_rx => {
+            match result {
+                Ok(res) => res,
+                Err(_) => {
+                    println!("[quick-register-simple] Token 等待超时或失败");
+                    let _ = webview.close();
+                    return Err(ApiError::from(anyhow!("等待 Token 超时或失败")));
+                }
+            }
+        }
+        _ = window_close_rx2 => {
+            return Err(ApiError::from(anyhow!("浏览器窗口被关闭，注册取消")));
         }
     };
     
@@ -178,12 +219,11 @@ pub async fn quick_register_simple(
     let cookies = match wait_for_request_cookies(&webview, &url, Duration::from_secs(6)).await {
         Ok(cookies) => {
             println!("[quick-register-simple] 获取到 cookies: {}", &cookies[..cookies.len().min(100)]);
-            cookies
+            Some(cookies)
         }
         Err(err) => {
-            println!("[quick-register-simple] 获取 cookies 失败: {}", err);
-            let _ = webview.close();
-            return Err(ApiError::from(err));
+            println!("[quick-register-simple] 获取 cookies 失败: {}，将继续保存账号", err);
+            None
         }
     };
 
@@ -193,7 +233,7 @@ pub async fn quick_register_simple(
     // 保存账号
     println!("[quick-register-simple] 保存账号...");
     let mut manager = state.account_manager.lock().await;
-    let mut account = manager.add_account_by_token(token, Some(cookies), Some(password.clone())).await.map_err(ApiError::from)?;
+    let mut account = manager.add_account_by_token(token, cookies, Some(password.clone())).await.map_err(ApiError::from)?;
     
     // 如果邮箱为空或包含*，更新邮箱
     if account.email.trim().is_empty() || account.email.contains('*') || !account.email.contains('@') {
@@ -364,6 +404,9 @@ fn build_register_helper_script(port: u16) -> String {
 
   const setValue = (input, value) => {
     if (!input) return false;
+    // 如果值已经相同，直接返回成功
+    if (input.value === value) return true;
+
     const proto = Object.getPrototypeOf(input);
     const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
     input.focus();
@@ -374,8 +417,7 @@ fn build_register_helper_script(port: u16) -> String {
     }
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
-    input.dispatchEvent(new Event("blur", { bubbles: true }));
-    return true;
+    return input.value === value;
   };
   
   const findInputByLabel = (labels) => {
@@ -448,15 +490,42 @@ fn build_register_helper_script(port: u16) -> String {
     );
   };
   
-  const runWithRetry = (fn, maxTries = 40) => {
+  const runWithRetry = (fn, maxTries = 60) => {
     let tries = 0;
-    const timer = setInterval(() => {
+    let lastSuccessTime = Date.now();
+    const startTime = Date.now();
+
+    const tryExecute = () => {
       tries += 1;
       const ok = fn();
-      if (ok || tries >= maxTries) {
+
+      if (ok) {
+        lastSuccessTime = Date.now();
+        clearInterval(timer);
+        return;
+      }
+
+      // 如果已经运行超过 30 秒，强制结束
+      if (Date.now() - startTime > 30000) {
+        console.log('[AutoRegister] 重试超时，结束执行');
+        clearInterval(timer);
+        return;
+      }
+
+      if (tries >= maxTries) {
         clearInterval(timer);
       }
-    }, 500);
+    };
+
+    // 立即执行第一次
+    tryExecute();
+
+    // 使用动态间隔：前10次快速重试(100ms)，之后减慢(200ms)
+    let interval = 100;
+    const timer = setInterval(() => {
+      if (tries > 10) interval = 200;
+      tryExecute();
+    }, interval);
   };
 
   const findTextNodeElement = (labels) => {
@@ -636,7 +705,7 @@ pub async fn wait_for_request_cookies(
                 return Ok(cookies);
             }
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     Err(anyhow!("未能获取 Cookie"))
 }

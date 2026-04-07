@@ -20,6 +20,8 @@ export function Settings({
   const [traePath, setTraePath] = useState<string>("");
   const [traePathLoading, setTraePathLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [showSecretKey, setShowSecretKey] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
   
   // 清除登录状态确认对话框
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -30,6 +32,11 @@ export function Settings({
       privacy_auto_enable: true,
       auto_start_enabled: false,
       api_key: "",
+      custom_tempmail_config: {
+        api_url: "",
+        secret_key: "",
+        email_domain: "",
+      },
     }),
     []
   );
@@ -505,11 +512,11 @@ export function Settings({
           </div>
         </div>
 
-        {/* API 密钥设置 */}
+        {/* 自定义临时邮箱配置 */}
         <div className="setting-item" style={{ alignItems: 'flex-start' }}>
           <div className="setting-info" style={{ flex: 1 }}>
             <div className="setting-label">
-              API 密钥
+              自定义临时邮箱
               <span style={{ 
                 fontSize: '11px', 
                 padding: '2px 6px', 
@@ -520,13 +527,96 @@ export function Settings({
                 fontWeight: 'normal'
               }}>可选</span>
             </div>
-            <div className="setting-desc">用于访问验证码获取服务，留空则使用默认服务</div>
-            <div style={{ marginTop: '8px' }}>
+            <div className="setting-desc">配置自己的 Cloudflare Worker 临时邮箱服务</div>
+            <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <input
-                type="password"
-                value={currentSettings.api_key || ''}
-                onChange={(e) => updateSettings({ api_key: e.target.value }, 'API 密钥已更新')}
-                placeholder="请输入 API 密钥"
+                type="text"
+                value={currentSettings.custom_tempmail_config?.api_url || ''}
+                onChange={(e) => updateSettings({ 
+                  custom_tempmail_config: { 
+                    ...currentSettings.custom_tempmail_config, 
+                    api_url: e.target.value 
+                  } 
+                }, '临时邮箱配置已更新')}
+                placeholder="Worker 地址，如：https://your-worker.workers.dev"
+                disabled={settingsDisabled}
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  background: 'var(--bg-secondary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  color: 'var(--text-primary)',
+                  outline: 'none',
+                }}
+              />
+              <div style={{
+                position: 'relative',
+                width: '100%',
+              }}>
+                <input
+                  type={showSecretKey ? 'text' : 'password'}
+                  value={currentSettings.custom_tempmail_config?.secret_key || ''}
+                  onChange={(e) => updateSettings({ 
+                    custom_tempmail_config: { 
+                      ...currentSettings.custom_tempmail_config, 
+                      secret_key: e.target.value 
+                    } 
+                  }, '临时邮箱配置已更新')}
+                  placeholder="API 密钥"
+                  disabled={settingsDisabled}
+                  style={{
+                    width: '100%',
+                    padding: '10px 40px 10px 12px',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    color: 'var(--text-primary)',
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={() => setShowSecretKey(!showSecretKey)}
+                  disabled={settingsDisabled}
+                  style={{
+                    position: 'absolute',
+                    right: '8px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    padding: '6px',
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: settingsDisabled ? 'not-allowed' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  {showSecretKey ? (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)' }}>
+                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                      <line x1="1" y1="1" x2="23" y2="23"></line>
+                    </svg>
+                  ) : (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)' }}>
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                      <circle cx="12" cy="12" r="3"></circle>
+                    </svg>
+                  )}
+                </button>
+              </div>
+              <input
+                type="text"
+                value={currentSettings.custom_tempmail_config?.email_domain || ''}
+                onChange={(e) => updateSettings({ 
+                  custom_tempmail_config: { 
+                    ...currentSettings.custom_tempmail_config, 
+                    email_domain: e.target.value 
+                  } 
+                }, '临时邮箱配置已更新')}
+                placeholder="邮箱域名，如：your-domain.com"
                 disabled={settingsDisabled}
                 style={{
                   width: '100%',

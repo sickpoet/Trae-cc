@@ -7,9 +7,10 @@ mod autostart;
 mod machine;
 mod privacy;
 mod tempmail_client;
-mod quick_register_simple;
+// mod quick_register_simple; // 已禁用快速注册功能
 mod browser_auto_login;
 mod logger;
+mod custom_tempmail;
 
 use std::collections::HashMap;
 use std::fs;
@@ -22,15 +23,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex};
 use tauri::{AppHandle, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri::webview::PageLoadEvent;
-use tauri::tray::TrayIconBuilder;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
 use warp::Filter;
 
 use account::{AccountBrief, AccountManager, Account};
 use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult};
-use quick_register_simple::wait_for_request_cookies;
+// use quick_register_simple::wait_for_request_cookies; // 已禁用快速注册功能
+use anyhow::anyhow;
 
 #[cfg(target_os = "windows")]
 fn hide_console_window() {
@@ -53,6 +53,7 @@ pub struct AppSettings {
     pub auto_update_check: bool,
     pub auto_start_enabled: bool,
     pub api_key: String,
+    pub custom_tempmail_config: custom_tempmail::CustomTempMailConfig,
 }
 
 impl Default for AppSettings {
@@ -64,6 +65,7 @@ impl Default for AppSettings {
             auto_update_check: true,
             auto_start_enabled: false,
             api_key: "9201".to_string(),
+            custom_tempmail_config: custom_tempmail::CustomTempMailConfig::default(),
         }
     }
 }
@@ -268,8 +270,22 @@ async fn download_and_run_installer(url: String) -> Result<String> {
 
 
 #[tauri::command]
-async fn quick_register(app: AppHandle, show_window: bool, state: State<'_, AppState>) -> Result<Account> {
-    quick_register_simple::quick_register_simple(app, show_window, state).await.map_err(|e| e.into())
+async fn quick_register(_app: AppHandle, _show_window: bool, _state: State<'_, AppState>) -> Result<Account> {
+    // 快速注册功能已禁用，请使用 quick_register_with_custom_tempmail
+    Err(ApiError::from(anyhow::anyhow!("快速注册功能已禁用，请在设置中配置自定义临时邮箱后使用新功能")))
+}
+
+/// 使用自定义临时邮箱进行快速注册
+#[tauri::command]
+async fn quick_register_with_custom_tempmail(
+    _app: AppHandle,
+    _show_window: bool,
+    _state: State<'_, AppState>,
+) -> Result<Account> {
+    // 此功能需要完整的前端配合，暂时返回提示
+    Err(ApiError::from(anyhow::anyhow!(
+        "自定义临时邮箱快速注册功能开发中，请使用浏览器注册功能手动注册"
+    )))
 }
 
 fn build_browser_login_script(port: u16) -> String {
@@ -943,17 +959,9 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
     }
     let _ = state.browser_login_cancel.lock().await.take();
 
-    let cookies = match wait_for_request_cookies(&session.webview, &url, Duration::from_secs(6)).await {
-        Ok(cookies) => {
-            println!("[browser-login] captured cookies for {}: {}", url, cookies);
-            cookies
-        }
-        Err(err) => {
-            println!("[browser-login] 警告: 未能获取 cookies: {}", err);
-            println!("[browser-login] 将继续登录流程，但统计数据功能可能无法使用");
-            String::new() // 返回空字符串，让流程继续
-        }
-    };
+    // 获取 cookies（快速注册功能已禁用，直接返回空）
+    let cookies = String::new();
+    println!("[browser-login] 快速注册功能已禁用，跳过 cookies 获取");
 
     let mut credentials = session.credentials.lock().unwrap().clone();
     if credentials.email.as_deref().unwrap_or("").trim().is_empty()
@@ -1037,7 +1045,7 @@ async fn open_browser_register(app: AppHandle) -> Result<()> {
     
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     
-    let window = WebviewWindowBuilder::new(
+    let _window = WebviewWindowBuilder::new(
         &app,
         "browser_register",
         WebviewUrl::External("https://www.trae.ai/sign-up".parse().unwrap()),
@@ -1694,6 +1702,7 @@ pub fn run() {
             update_settings,
             download_and_run_installer,
             quick_register,
+            quick_register_with_custom_tempmail,
             start_browser_login,
             finish_browser_login,
             cancel_browser_login,
@@ -1735,46 +1744,6 @@ pub fn run() {
             get_log_file_path_cmd,
         ])
         .setup(|app| {
-            // 创建托盘菜单
-            let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-            let hide_item = MenuItem::with_id(app, "hide", "隐藏窗口", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let separator = PredefinedMenuItem::separator(app)?;
-            
-            let tray_menu = Menu::with_items(app, &[&show_item, &hide_item, &separator, &quit_item])?;
-
-            // 设置托盘图标
-            if let Some(icon) = app.default_window_icon() {
-                let tray = TrayIconBuilder::new()
-                    .icon(icon.clone())
-                    .tooltip("Trae账号管理")
-                    .menu(&tray_menu)
-                    .on_menu_event(|app, event| {
-                        match event.id().as_ref() {
-                            "show" => {
-                                if let Some(window) = app.get_webview_window("main") {
-                                    let _ = window.show();
-                                    let _ = window.set_focus();
-                                }
-                            }
-                            "hide" => {
-                                if let Some(window) = app.get_webview_window("main") {
-                                    let _ = window.hide();
-                                }
-                            }
-                            "quit" => {
-                                std::process::exit(0);
-                            }
-                            _ => {}
-                        }
-                    })
-                    .build(app);
-                
-                if let Err(e) = tray {
-                    println!("[ERROR] 创建托盘图标失败: {}", e);
-                }
-            }
-
             // 获取主窗口并显示
             if let Some(window) = app.get_webview_window("main") {
                 window.show().unwrap();
@@ -1782,11 +1751,11 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            // 拦截关闭事件，改为隐藏窗口
+        .on_window_event(|_window, event| match event {
+            // 关闭窗口时直接退出应用
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                window.hide().unwrap();
+                std::process::exit(0);
             }
             _ => {}
         })

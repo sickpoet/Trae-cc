@@ -997,158 +997,161 @@ impl AccountManager {
         Ok(())
     }
 
-    /// 导出账号数据
+    /// 导出账号数据（只包含邮箱和密码）
     pub fn export_accounts(&self) -> Result<String> {
-        let export_data: Vec<serde_json::Value> = self.store.accounts.iter().map(|acc| {
-            // 检查邮箱是否脱敏（包含*号），如果是则不导出邮箱
-            let email = if acc.email.contains('*') {
-                String::new()  // 脱敏邮箱导出为空字符串
+        let export_data: Vec<serde_json::Value> = self.store.accounts.iter().filter_map(|acc| {
+            // 检查邮箱是否脱敏（包含*号），如果是则跳过
+            let email = if acc.email.contains('*') || acc.email.trim().is_empty() {
+                return None;
             } else {
                 acc.email.clone()
             };
             
-            serde_json::json!({
-                "name": acc.name,
+            // 只导出邮箱和密码
+            Some(serde_json::json!({
                 "email": email,
-                "cookies": acc.cookies,
-                "user_id": acc.user_id,
-                "tenant_id": acc.tenant_id,
-                "region": acc.region,
-                "plan_type": acc.plan_type,
-                "avatar_url": acc.avatar_url,
-                "jwt_token": acc.jwt_token,
-                "machine_id": acc.machine_id,
-                "password": acc.password,
-            })
+                "password": acc.password.clone().unwrap_or_default(),
+            }))
         }).collect();
 
         serde_json::to_string_pretty(&export_data)
             .map_err(|e| anyhow!("导出失败: {}", e))
     }
 
-    /// 导入账号数据
+    /// 导入账号数据（支持邮箱密码自动登录）
     pub async fn import_accounts(&mut self, data: &str) -> Result<usize> {
-        let import_data: Vec<serde_json::Value> = serde_json::from_str(data)
+        #[derive(serde::Deserialize)]
+        struct ImportItem {
+            email: String,
+            password: String,
+        }
+        
+        let import_data: Vec<ImportItem> = serde_json::from_str(data)
             .map_err(|e| anyhow!("JSON 解析失败: {}", e))?;
 
-        // 1. Prepare tasks for fetching account info
-        let mut tasks = Vec::new();
-        // Limit concurrency to 5 to avoid rate limits
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
+        println!("[AccountManager] 开始导入 {} 个账号", import_data.len());
         
-        // Pre-check for existing accounts by email to skip unnecessary requests
-        let existing_emails: std::collections::HashSet<String> = self.store.accounts.iter()
-            .map(|a| a.email.trim().to_lowercase())
-            .filter(|e| !e.is_empty())
-            .collect();
-
+        // 限制并发数为 3，避免触发限流
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
+        let mut tasks = Vec::new();
+        
         for item in import_data {
-            let cookies = item.get("cookies")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let email = item.email.trim().to_string();
+            let password = item.password;
             
-            let email = item.get("email")
-                .and_then(|v| v.as_str())
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty());
-
-            let password = item.get("password")
-                .and_then(|v| v.as_str())
-                .map(|v| v.to_string())
-                .filter(|v| !v.is_empty());
-                
-            let machine_id = item.get("machine_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v.to_string())
-                .filter(|v| !v.is_empty());
-
-            if cookies.is_empty() {
+            if email.is_empty() || password.is_empty() {
+                println!("[AccountManager] 跳过空邮箱或密码");
                 continue;
             }
             
-            // If email is provided in import data and already exists, update directly without network request
-            if let Some(ref e) = email {
-                if existing_emails.contains(&e.to_lowercase()) {
-                    if let Some(existing) = self.store.accounts.iter_mut().find(|a| a.email.eq_ignore_ascii_case(e)) {
-                        // Update existing account locally
-                        if let Some(new_mid) = machine_id {
-                             if existing.machine_id != Some(new_mid.clone()) {
-                                 existing.machine_id = Some(new_mid);
-                             }
-                        }
-                        if let Some(new_pass) = password {
-                             if existing.password != Some(new_pass.clone()) {
-                                 existing.password = Some(new_pass);
-                             }
-                        }
-                        // Always update cookies for existing account
-                        existing.cookies = cookies;
-                        self.save_store()?;
-                        continue;
-                    }
-                }
+            // 检查是否已存在
+            let existing = self.store.accounts.iter()
+                .any(|a| a.email.eq_ignore_ascii_case(&email));
+            
+            if existing {
+                println!("[AccountManager] 账号已存在，跳过: {}", email);
+                continue;
             }
             
-            let cookies_clone = cookies.clone();
             let semaphore_clone = semaphore.clone();
             
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-                // Perform network requests
-                let result = fetch_account_info_internal(cookies_clone, password).await;
-                (result, machine_id)
+                println!("[AccountManager] 正在登录: {}", email);
+                
+                // 使用邮箱密码登录
+                match login_with_email(&email, &password).await {
+                    Ok(login_result) => {
+                        println!("[AccountManager] 登录成功: {}", email);
+                        Some((login_result, email, password))
+                    }
+                    Err(e) => {
+                        println!("[AccountManager] 登录失败 {}: {}", email, e);
+                        None
+                    }
+                }
             }));
         }
 
-        // 2. Wait for all tasks to complete
-        let mut new_accounts = Vec::new();
+        // 等待所有登录任务完成
+        let mut imported_count = 0;
+        
         for task in tasks {
-            if let Ok((Ok(mut account), machine_id)) = task.await {
-                if let Some(mid) = machine_id {
-                    account.machine_id = Some(mid);
+            if let Ok(Some((login_result, email, password))) = task.await {
+                // 检查是否已存在（再次检查，避免并发重复）
+                if self.store.accounts.iter().any(|a| a.user_id == login_result.user_id) {
+                    println!("[AccountManager] 账号已存在（user_id 重复）: {}", email);
+                    continue;
                 }
-                new_accounts.push(account);
+                
+                // 使用 Token 获取完整用户信息和使用量
+                match TraeApiClient::new_with_token(&login_result.token) {
+                    Ok(client) => {
+                        // 并行获取用户信息和用量
+                        let user_info_future = client.get_user_info_by_token();
+                        let usage_future = client.get_usage_summary_by_token();
+                        
+                        match tokio::join!(user_info_future, usage_future) {
+                            (Ok(user_info), Ok(usage)) => {
+                                let mut account = Account::new(
+                                    user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
+                                    email.clone(),
+                                    login_result.cookies,
+                                    login_result.user_id,
+                                    login_result.tenant_id,
+                                );
+                                
+                                account.avatar_url = user_info.avatar_url.unwrap_or_default();
+                                account.jwt_token = Some(login_result.token);
+                                account.token_expired_at = Some(login_result.expired_at);
+                                account.password = Some(password);
+                                account.plan_type = usage.plan_type;
+                                
+                                self.store.accounts.push(account);
+                                imported_count += 1;
+                                println!("[AccountManager] 账号导入成功: {} (用量已获取)", email);
+                            }
+                            (Ok(user_info), Err(e)) => {
+                                // 获取用量失败，但仍创建账号
+                                let mut account = Account::new(
+                                    user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
+                                    email.clone(),
+                                    login_result.cookies,
+                                    login_result.user_id,
+                                    login_result.tenant_id,
+                                );
+                                
+                                account.avatar_url = user_info.avatar_url.unwrap_or_default();
+                                account.jwt_token = Some(login_result.token);
+                                account.token_expired_at = Some(login_result.expired_at);
+                                account.password = Some(password);
+                                
+                                self.store.accounts.push(account);
+                                imported_count += 1;
+                                println!("[AccountManager] 账号导入成功: {} (用量获取失败: {})", email, e);
+                            }
+                            (Err(e), _) => {
+                                println!("[AccountManager] 获取用户信息失败 {}: {}", email, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("[AccountManager] 创建 API 客户端失败 {}: {}", email, e);
+                    }
+                }
             }
         }
 
-        // 3. Update store
-        let mut imported_count = 0;
-        let mut changed = false;
-        
-        for account in new_accounts {
-             if let Some(existing) = self.store.accounts.iter_mut().find(|a| a.user_id == account.user_id) {
-                 // Update existing account's machine_id if new one is provided
-                 if let Some(new_mid) = account.machine_id {
-                     if existing.machine_id != Some(new_mid.clone()) {
-                         existing.machine_id = Some(new_mid);
-                         changed = true;
-                     }
-                 }
-                 // Update password if provided
-                 if let Some(new_pass) = account.password {
-                     if existing.password != Some(new_pass.clone()) {
-                         existing.password = Some(new_pass);
-                         changed = true;
-                     }
-                 }
-                 continue;
-             }
-             
-             self.store.accounts.push(account);
-             imported_count += 1;
-             changed = true;
-        }
-
+        // 设置活跃账号
         if self.store.active_account_id.is_none() && !self.store.accounts.is_empty() {
             self.store.active_account_id = Some(self.store.accounts[0].id.clone());
-            changed = true;
         }
 
-        if changed {
+        if imported_count > 0 {
             self.save_store()?;
         }
 
+        println!("[AccountManager] 导入完成，成功导入 {} 个账号", imported_count);
         Ok(imported_count)
     }
 

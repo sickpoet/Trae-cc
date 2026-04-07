@@ -82,6 +82,12 @@ impl TempMailClient {
 
         println!("[TempMailClient] 开始等待验证码，超时: {} 秒", timeout_duration.as_secs());
         println!("[TempMailClient] 邮箱: {}@tempmail.cn", shortid);
+        println!("[TempMailClient] 可执行文件: {:?}", exe_path);
+
+        // 检查可执行文件是否存在
+        if !exe_path.exists() {
+            return Err(anyhow::anyhow!("可执行文件不存在: {:?}", exe_path));
+        }
 
         // 使用解压后的可执行文件来获取验证码
         let code = run_socketio_client(exe_path, shortid, timeout_duration).await?;

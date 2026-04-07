@@ -38,6 +38,7 @@ tauri-plugin-dialog = "2.2"
 tauri-plugin-updater = "2.2"
 tauri-plugin-positioner = "2.2"
 rusqlite = { version = "0.31", features = ["bundled"] }
+walkdir = "2"
 
 # Logging dependencies
 tauri-plugin-log = "2"

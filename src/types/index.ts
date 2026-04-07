@@ -111,12 +111,19 @@ export interface ApiError {
   message: string;
 }
 
+export interface CustomTempMailConfig {
+  api_url: string;
+  secret_key: string;
+  email_domain: string;
+}
+
 export interface AppSettings {
   quick_register_show_window: boolean;
   auto_refresh_enabled: boolean;
   privacy_auto_enable: boolean;
   auto_start_enabled: boolean;
   api_key: string; // 用于访问验证码获取服务
+  custom_tempmail_config: CustomTempMailConfig;
 }
 
 // 用户统计数据
