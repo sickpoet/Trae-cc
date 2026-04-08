@@ -157,7 +157,6 @@ impl AccountManager {
         
         if let Some(index) = existing_index {
             // 账号已存在，更新信息
-            println!("[AccountManager] 账号已存在，更新信息: user_id={}", token_result.user_id);
             {
                 let existing_account = &mut self.store.accounts[index];
                 existing_account.cookies = cookies;
@@ -192,18 +191,14 @@ impl AccountManager {
         account.token_expired_at = Some(token_result.expired_at);
         account.password = password;
 
-        println!("[AccountManager] 添加新账号到列表: id={}, user_id={}, email={}", account.id, account.user_id, account.email);
         self.store.accounts.push(account.clone());
-        println!("[AccountManager] 当前账号列表长度: {}", self.store.accounts.len());
 
         // 如果是第一个账号，设为活跃账号
         if self.store.active_account_id.is_none() {
             self.store.active_account_id = Some(account.id.clone());
-            println!("[AccountManager] 设置第一个账号为活跃账号: {}", account.id);
         }
 
         self.save_store()?;
-        println!("[AccountManager] 账号保存成功: id={}", account.id);
         Ok(account)
     }
 
@@ -215,7 +210,6 @@ impl AccountManager {
         let is_jwt = token.split('.').count() == 3;
         
         if !is_jwt {
-            println!("[AccountManager] Token 不是 JWT 格式，尝试使用 Cookies 添加账号");
             // 尝试使用 Cookies 添加账号
             if let Some(ref cookies_str) = cookies {
                 if !cookies_str.is_empty() {
@@ -387,10 +381,7 @@ impl AccountManager {
                 acc.jwt_token = Some(token.clone());
                 acc.token_expired_at = None;
                 if let Some(cookie_str) = cookies.as_ref().filter(|v| !v.is_empty()) {
-                    println!("[upsert_account_by_token] 更新账号 cookies: user_id={}, cookies_length={}", acc.user_id, cookie_str.len());
                     acc.cookies = cookie_str.to_string();
-                } else {
-                    println!("[upsert_account_by_token] 没有提供 cookies，保留原有 cookies: user_id={}, existing_cookies_length={}", acc.user_id, acc.cookies.len());
                 }
                 if let Some(pass) = password.as_ref().filter(|v| !v.is_empty()) {
                     acc.password = Some(pass.to_string());
@@ -446,8 +437,6 @@ impl AccountManager {
         
         if let Some(index) = existing_index {
             // 账号已存在，更新信息
-            println!("[AccountManager] 账号已存在，更新信息: user_id={}", login_result.user_id);
-            println!("[AccountManager] 更新 cookies (长度: {})", login_result.cookies.len());
             
             // 使用 Token 获取完整的用户信息
             let client = TraeApiClient::new_with_token(&login_result.token)?;
@@ -479,7 +468,6 @@ impl AccountManager {
             }
             
             self.save_store()?;
-            println!("[AccountManager] ✅ 账号信息已保存");
             return Ok(self.store.accounts[index].clone());
         }
 
@@ -573,7 +561,6 @@ impl AccountManager {
                 
                 if expired && !account.cookies.is_empty() {
                     // Token 已过期，尝试使用 Cookies 刷新
-                    println!("[INFO] Token 已过期，尝试使用 Cookies 刷新...");
                     let mut cookie_client = TraeApiClient::new(&account.cookies)?;
                     match cookie_client.get_user_token().await {
                         Ok(token_result) => {
@@ -599,7 +586,6 @@ impl AccountManager {
             }
         } else if !account.cookies.is_empty() {
             // 没有 Token 但有 Cookies，尝试获取 Token
-            println!("[INFO] 没有 Token，尝试使用 Cookies 获取...");
             let mut cookie_client = TraeApiClient::new(&account.cookies)?;
             match cookie_client.get_user_token().await {
                 Ok(token_result) => {
@@ -636,16 +622,7 @@ impl AccountManager {
 
         // 如果账号有绑定的机器码，也更新系统机器码
         if let Some(machine_id) = &account.machine_id {
-            println!("[INFO] 尝试切换系统机器码到: {}", machine_id);
-            match crate::machine::set_machine_guid(machine_id) {
-                Ok(_) => println!("[INFO] ✅ 已切换系统机器码: {}", machine_id),
-                Err(e) => {
-                    println!("[WARN] ❌ 切换系统机器码失败: {}", e);
-                    println!("[WARN] 这可能导致 Trae 仍然使用旧的设备标识进行限制");
-                }
-            }
-        } else {
-            println!("[WARN] 账号没有 machine_id，无法切换系统机器码");
+            let _ = crate::machine::set_machine_guid(machine_id);
         }
 
         // 设置活跃账号和当前使用的账号
@@ -653,7 +630,6 @@ impl AccountManager {
         self.store.current_account_id = Some(account_id.to_string());
         self.save_store()?;
 
-        println!("[INFO] 已切换到账号: {}", account.email);
         Ok(())
     }
 
@@ -724,7 +700,6 @@ impl AccountManager {
                     let error_msg = e.to_string();
                     // 如果是 401 错误且有 Cookies，尝试刷新 Token
                     if error_msg.contains("401") && !account.cookies.is_empty() {
-                        println!("[INFO] Token 已过期，尝试使用 Cookies 刷新...");
                         // 使用 Cookies 刷新 Token
                         let mut cookie_client = TraeApiClient::new(&account.cookies)?;
                         let token_result = cookie_client.get_user_token().await?;
@@ -748,14 +723,10 @@ impl AccountManager {
                                 region: if account.region.is_empty() { "SG".to_string() } else { account.region.clone() },
                             };
 
-                            if let Err(e) = crate::machine::write_trae_login_info(&login_info) {
-                                println!("[WARN] 更新 Trae IDE Token 失败: {}", e);
-                            } else if crate::machine::is_trae_running() {
-                                if let Err(e) = crate::machine::kill_trae() {
-                                    println!("[WARN] 重启 Trae IDE 失败: {}", e);
-                                } else if let Err(e) = crate::machine::open_trae() {
-                                    println!("[WARN] 重启 Trae IDE 失败: {}", e);
-                                }
+                            let _ = crate::machine::write_trae_login_info(&login_info);
+                            if crate::machine::is_trae_running() {
+                                let _ = crate::machine::kill_trae();
+                                let _ = crate::machine::open_trae();
                             }
                         }
 
@@ -810,8 +781,6 @@ impl AccountManager {
             acc.jwt_token = Some(token_result.token);
             acc.token_expired_at = Some(token_result.expired_at);
             acc.updated_at = chrono::Utc::now().timestamp();
-            // 保留原有的 cookies，因为 API 没有返回新的 cookies
-            println!("[refresh_token] 已刷新 token，保留原有 cookies (长度: {})", acc.cookies.len());
         }
 
         self.save_store()?;

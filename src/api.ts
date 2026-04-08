@@ -1,6 +1,56 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Account, AccountBrief, AppSettings, UsageSummary, UsageEventsResponse, UserStatisticData } from "./types";
 
+// ============ 快速注册后端 API 配置 ============
+// 从环境变量读取配置，如果没有则使用空字符串（功能将不可用）
+const QUICK_REGISTER_API_BASE = import.meta.env.VITE_QUICK_REGISTER_API_BASE || "";
+const APP_ID = import.meta.env.VITE_APP_ID || "";
+const APP_SECRET = import.meta.env.VITE_APP_SECRET || "";
+
+// 验证配置是否有效
+function checkApiConfig(): boolean {
+  return !!(QUICK_REGISTER_API_BASE && APP_ID && APP_SECRET);
+}
+
+// 任务创建响应
+export interface CreateTaskResponse {
+  success: boolean;
+  ticket: string;
+  qrcode_url: string;
+  is_vip: boolean;
+  url_scheme: string;
+  message: string;
+}
+
+// 任务状态
+export type TaskStatus = "pending" | "verified" | "expired" | "claimed";
+
+// 查询任务状态响应
+export interface TaskStatusResponse {
+  success: boolean;
+  ticket?: string;
+  status: TaskStatus;
+  platform_id?: string;
+  created_at?: number;
+  verified_at?: number;
+  resource_payload?: {
+    account: string;
+    password: string;
+  }[] | null;
+  access_token?: string | null;
+  platform?: string;
+}
+
+// 领取资源响应 - 根据后端实际返回格式
+export interface ClaimResourceResponse {
+  success: boolean;
+  resource_payload: {
+    account: string;
+    password: string;
+  }[];
+  message: string;
+}
+
 function checkNetwork() {
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     throw new Error("网络连接已断开，请检查网络设置");
@@ -57,11 +107,6 @@ export async function cancelBrowserLogin(): Promise<void> {
 // 浏览器自动登录
 export async function browserAutoLogin(email: string, password: string): Promise<Account> {
   return invokeNetwork("browser_auto_login_command", { email, password });
-}
-
-// 打开浏览器注册页面
-export async function openBrowserRegister(): Promise<void> {
-  return invoke("open_browser_register");
 }
 
 // 下载并运行更新安装包（Windows: .msi）
@@ -279,4 +324,105 @@ export async function clearLogs(): Promise<void> {
 // 获取日志文件路径
 export async function getLogFilePath(): Promise<string> {
   return invoke("get_log_file_path_cmd");
+}
+
+// ============ 快速注册后端 API（通过 Tauri Rust 后端调用，绕过 CORS） ============
+
+/**
+ * 创建快速注册任务
+ * @param platformId 用户平台ID（如QQ号）
+ * @returns 包含ticket和二维码链接的响应
+ */
+export async function createQuickRegisterTask(platformId: string): Promise<CreateTaskResponse> {
+  // 通过 Tauri 命令调用 Rust 后端，绕过 CORS 限制
+  return invoke("quick_register_create_task", { platformId });
+}
+
+/**
+ * 查询任务状态
+ * @param ticket 任务票据
+ * @returns 任务状态响应
+ */
+export async function getTaskStatus(ticket: string): Promise<TaskStatusResponse> {
+  console.log("查询任务状态 ticket:", ticket);
+  // 通过 Tauri 命令调用 Rust 后端，绕过 CORS 限制
+  return invoke("quick_register_get_status", { ticket });
+}
+
+/**
+ * 领取资源（获取账号）
+ * @param ticket 任务票据
+ * @returns 包含账号信息的响应
+ */
+export async function claimResource(ticket: string): Promise<ClaimResourceResponse> {
+  // 通过 Tauri 命令调用 Rust 后端，绕过 CORS 限制
+  return invoke("quick_register_claim_resource", { ticket });
+}
+
+// 统计响应
+export interface StatsResponse {
+  success: boolean;
+  data: {
+    available_count: number;
+    resource_type: string;
+  };
+  message: string;
+}
+
+/**
+ * 获取剩余账号数量统计
+ * @returns 统计响应
+ */
+export async function getQuickRegisterStats(): Promise<StatsResponse> {
+  // 通过 Tauri 命令调用 Rust 后端，绕过 CORS 限制
+  return invoke("quick_register_get_stats");
+}
+
+/**
+ * 轮询等待任务验证完成
+ * @param ticket 任务票据
+ * @param timeoutMs 超时时间（毫秒）
+ * @param intervalMs 轮询间隔（毫秒）
+ * @returns 验证成功后的任务状态
+ */
+export async function pollTaskVerification(
+  ticket: string,
+  timeoutMs: number = 600000, // 默认10分钟
+  intervalMs: number = 3000   // 默认3秒轮询一次
+): Promise<TaskStatusResponse> {
+  const startTime = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const poll = async () => {
+      try {
+        // 检查是否超时
+        if (Date.now() - startTime > timeoutMs) {
+          reject(new Error("等待验证超时，请重新尝试"));
+          return;
+        }
+
+        const status = await getTaskStatus(ticket);
+        console.log("轮询状态:", status);
+
+        // 后端可能返回的状态: pending, verified, claimed, expired
+        if (status.status === "verified" || status.status === "claimed") {
+          resolve(status);
+          return;
+        }
+
+        if (status.status === "expired") {
+          reject(new Error("二维码已过期，请重新获取"));
+          return;
+        }
+
+        // 继续轮询 (pending 状态)
+        setTimeout(poll, intervalMs);
+      } catch (error: any) {
+        console.error("轮询出错:", error);
+        reject(error);
+      }
+    };
+
+    poll();
+  });
 }

@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import * as api from "../api";
 import type { Account } from "../types";
+import { QuickRegisterModal } from "./QuickRegisterModal";
 
 interface AddAccountModalProps {
   isOpen: boolean;
@@ -13,7 +14,7 @@ interface AddAccountModalProps {
   canExport?: boolean;
 }
 
-type AddMode = "browser" | "browser-register" | "register" | "more";
+type AddMode = "browser" | "register" | "quick-register-v2" | "more";
 type MoreSubMode = "trae-ide" | "import-export" | null;
 
 // 注册进度步骤
@@ -54,6 +55,9 @@ export function AddAccountModal({
   const [registerProgress, setRegisterProgress] = useState(0);
   const [registerStatus, setRegisterStatus] = useState("");
   const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  
+  // 新版快速注册弹窗状态
+  const [showQuickRegisterV2, setShowQuickRegisterV2] = useState(false);
 
   // 清理进度定时器
   useEffect(() => {
@@ -199,19 +203,6 @@ export function AddAccountModal({
     }
   };
 
-  // 打开浏览器注册页面
-  const handleOpenBrowserRegister = async () => {
-    setLoading(true);
-    try {
-      await api.openBrowserRegister();
-      onToast?.("success", "已打开浏览器注册页面");
-      handleClose();
-    } catch (err: any) {
-      setError(err.message || "打开注册页面失败");
-      setLoading(false);
-    }
-  };
-
   const handleClose = () => {
     setError("");
     setMode("browser");
@@ -324,20 +315,6 @@ export function AddAccountModal({
             浏览器登录
           </button>
           
-          {/* 浏览器注册按钮 */}
-          <button
-            className={`mode-tab ${mode === "browser-register" ? "active" : ""}`}
-            onClick={() => { setMode("browser-register"); setError(""); }}
-            disabled={loading}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-              <line x1="8" y1="21" x2="16" y2="21" />
-              <line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
-            浏览器注册
-          </button>
-          
           {/* 快速注册按钮 */}
           <button
             className={`mode-tab ${mode === "register" ? "active" : ""}`}
@@ -349,6 +326,24 @@ export function AddAccountModal({
               <path d="M5 12h14" />
             </svg>
             快速注册
+          </button>
+          
+          {/* 扫码快速注册按钮 */}
+          <button
+            className={`mode-tab ${mode === "quick-register-v2" ? "active" : ""}`}
+            onClick={() => { 
+              setShowQuickRegisterV2(true);
+              setError(""); 
+            }}
+            disabled={loading}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="3" width="7" height="7" rx="1" />
+              <rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" />
+              <rect x="14" y="14" width="7" height="7" rx="1" />
+            </svg>
+            扫码领号
           </button>
         </div>
 
@@ -393,35 +388,6 @@ export function AddAccountModal({
                 disabled={loading}
               >
                 {loading ? "等待登录..." : "打开登录页面"}
-              </button>
-            </div>
-          </div>
-        ) : mode === "browser-register" ? (
-          <div className="trae-ide-mode">
-            <div className="mode-description" style={{ minHeight: 'auto', padding: '24px' }}>
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-                <line x1="8" y1="21" x2="16" y2="21" />
-                <line x1="12" y1="17" x2="12" y2="21" />
-              </svg>
-              <h3>浏览器注册</h3>
-              <p>直接打开 Trae 注册页面，手动完成注册</p>
-            </div>
-
-            {error && <div className="error-message" style={{ margin: '0 24px 16px' }}>{error}</div>}
-
-            <div className="modal-actions">
-              <button type="button" onClick={handleClose} disabled={loading}>
-                取消
-              </button>
-              <button
-                type="button"
-                className="primary"
-                onClick={handleOpenBrowserRegister}
-                disabled={true}
-                title="功能暂不可用"
-              >
-                打开注册页面
               </button>
             </div>
           </div>
@@ -493,6 +459,24 @@ export function AddAccountModal({
           </div>
         ) : null}
       </div>
+      
+      {/* 新版快速注册弹窗 */}
+      <QuickRegisterModal
+        isOpen={showQuickRegisterV2}
+        onClose={() => {
+          setShowQuickRegisterV2(false);
+          setMode("browser");
+        }}
+        onToast={onToast}
+        onAccountsAdded={(accounts) => {
+          // 逐个通知父组件添加账号
+          accounts.forEach((account) => {
+            onAccountAdded?.(account);
+          });
+          // 关闭当前弹窗
+          handleClose();
+        }}
+      />
     </div>
   );
 }

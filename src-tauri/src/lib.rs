@@ -11,6 +11,7 @@ mod tempmail_client;
 mod browser_auto_login;
 mod logger;
 mod custom_tempmail;
+mod quick_register_backend;
 
 use std::collections::HashMap;
 use std::fs;
@@ -776,8 +777,6 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
     if browser_login.is_some() {
         return Err(anyhow::anyhow!("浏览器登录已在进行中").into());
     }
-    println!("[browser-login] start_browser_login: launching login window");
-
     let (token_tx, token_rx) = oneshot::channel::<(String, String)>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -797,7 +796,6 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
             if log_query.contains_key("password") {
                 log_query.insert("password".to_string(), "***".to_string());
             }
-            println!("[browser-login] callback query: {:?}", log_query);
             let token = query.get("token").cloned().unwrap_or_default();
             let state = query.get("state").cloned().unwrap_or_default();
             let href = query.get("href").cloned().unwrap_or_default();
@@ -856,7 +854,6 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
         .initialization_script(&script_init)
         .on_page_load(move |window, payload| {
             if payload.event() == PageLoadEvent::Finished {
-                println!("[browser-login] page load finished, injecting script");
                 let _ = window.eval(script_onload.clone());
             }
         })
@@ -872,11 +869,7 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
         }
     });
 
-    if let Err(e) = webview.clear_all_browsing_data() {
-        println!("[browser-login] clear browsing data failed: {}", e);
-    } else {
-        println!("[browser-login] cleared browsing data");
-    }
+    let _ = webview.clear_all_browsing_data();
     let _ = webview.navigate(Url::parse("https://www.trae.ai/login").unwrap());
 
     let _ = webview.set_focus();
@@ -897,7 +890,6 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
 
 #[tauri::command]
 async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
-    println!("[browser-login] finish_browser_login: waiting for token");
     let session = {
         let mut browser_login = state.browser_login.lock().await;
         browser_login.take().ok_or_else(|| anyhow::anyhow!("浏览器登录未开始"))?
@@ -959,9 +951,15 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
     }
     let _ = state.browser_login_cancel.lock().await.take();
 
-    // 获取 cookies（快速注册功能已禁用，直接返回空）
-    let cookies = String::new();
-    println!("[browser-login] 快速注册功能已禁用，跳过 cookies 获取");
+    // 获取 cookies
+    let cookies = session.webview.cookies()
+        .map(|cookies: Vec<tauri::webview::Cookie>| {
+            cookies.iter()
+                .map(|c| format!("{}={}", c.name(), c.value()))
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default();
 
     let mut credentials = session.credentials.lock().unwrap().clone();
     if credentials.email.as_deref().unwrap_or("").trim().is_empty()
@@ -1035,30 +1033,7 @@ async fn browser_auto_login_command(
     password: String,
     state: State<'_, AppState>,
 ) -> Result<Account> {
-    println!("[browser-auto-login-command] 收到自动登录请求");
     browser_auto_login::browser_auto_login(app, email, password, &state).await.map_err(|e| e.into())
-}
-
-#[tauri::command]
-async fn open_browser_register(app: AppHandle) -> Result<()> {
-    println!("[open-browser-register] 打开浏览器注册页面");
-    
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-    
-    let _window = WebviewWindowBuilder::new(
-        &app,
-        "browser_register",
-        WebviewUrl::External("https://www.trae.ai/sign-up".parse().unwrap()),
-    )
-    .title("Trae 注册")
-    .inner_size(1000.0, 750.0)
-    .visible(true)
-    .center()
-    .build()
-    .map_err(|e| ApiError::from(anyhow::Error::new(e)))?;
-    
-    println!("[open-browser-register] 浏览器窗口已创建");
-    Ok(())
 }
 
 #[tauri::command]
@@ -1137,35 +1112,20 @@ async fn switch_account(account_id: String, force: Option<bool>, state: State<'_
                 // Trae 启动成功，数据库文件已生成，现在写入隐私模式
                 let result = tokio::task::spawn_blocking(move || {
                     privacy::enable_privacy_mode_at_path_with_restart(db_path, || {
-                        println!("[INFO] 正在重启 Trae IDE 以应用隐私模式...");
                         machine::kill_trae()?;
                         machine::open_trae()
                     })
                 }).await;
 
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(err)) => {
-                        println!("[ERROR] 自动开启隐私模式失败: {}", err);
-                    }
-                    Err(err) => {
-                        println!("[ERROR] 自动开启隐私模式任务失败: {}", err);
-                    }
-                }
+                let _ = result;
             }
-            Ok(Err(err)) => {
-                println!("[ERROR] 启动 Trae IDE 失败: {}", err);
-            }
-            Err(err) => {
-                println!("[ERROR] 启动 Trae IDE 任务失败: {}", err);
-            }
+            Ok(Err(_)) => {}
+            Err(_) => {}
         }
     } else {
         // 隐私模式未启用，直接启动 Trae
         let _ = tokio::task::spawn_blocking(|| {
-            if let Err(e) = machine::open_trae() {
-                println!("[WARN] 自动打开 Trae IDE 失败: {}", e);
-            }
+            let _ = machine::open_trae();
         }).await;
     }
 
@@ -1210,7 +1170,6 @@ async fn fetch_usage_for_account(account: &Account) -> anyhow::Result<(UsageSumm
                 let error_msg = e.to_string();
                 // 如果是 401 错误且有 Cookies，尝试刷新 Token
                 if error_msg.contains("401") && !account.cookies.is_empty() {
-                    println!("[INFO] Token 已过期，尝试使用 Cookies 刷新...");
                     // 使用 Cookies 刷新 Token
                     let mut cookie_client = TraeApiClient::new(&account.cookies)?;
                     let token_result = cookie_client.get_user_token().await?;
@@ -1418,15 +1377,11 @@ async fn scan_trae_path() -> Result<String> {
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<Option<serde_json::Value>> {
     let updater = app.updater().map_err(|e| {
-        println!("[ERROR] 获取更新器失败: {}", e);
         ApiError::from(anyhow::anyhow!("获取更新器失败: {}", e))
     })?;
     
-    println!("[INFO] 正在检查更新...");
-    
     match updater.check().await {
         Ok(Some(update)) => {
-            println!("[INFO] 发现新版本: {}", update.version);
             let info = serde_json::json!({
                 "version": update.version,
                 "current_version": update.current_version,
@@ -1435,14 +1390,8 @@ async fn check_update(app: AppHandle) -> Result<Option<serde_json::Value>> {
             });
             Ok(Some(info))
         }
-        Ok(None) => {
-            println!("[INFO] 当前已是最新版本");
-            Ok(None)
-        }
-        Err(e) => {
-            println!("[ERROR] 检查更新失败: {}", e);
-            Err(ApiError::from(anyhow::anyhow!("检查更新失败: {}", e)))
-        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(ApiError::from(anyhow::anyhow!("检查更新失败: {}", e)))
     }
 }
 
@@ -1562,11 +1511,7 @@ async fn open_pricing(account_id: String, app: AppHandle, state: State<'_, AppSt
     .map_err(|e| anyhow::anyhow!("无法打开购买窗口: {}", e))?;
 
     // 强制清理数据
-    if let Err(e) = webview.clear_all_browsing_data() {
-        println!("[pricing] clear browsing data failed: {}", e);
-    } else {
-        println!("[pricing] cleared browsing data");
-    }
+    let _ = webview.clear_all_browsing_data();
 
     // 先导航到一个轻量页(404)来建立域上下文并执行注入，然后再由脚本跳转到 pricing
     // 这样可以确保 Cookie 在请求 pricing 之前就已经准备好
@@ -1588,11 +1533,7 @@ async fn handle_silent_start() -> anyhow::Result<()> {
     // 1. Refresh all accounts
     let account_ids: Vec<String> = manager.get_accounts().into_iter().map(|a| a.id).collect();
     for id in account_ids {
-        if let Err(e) = manager.refresh_token(&id).await {
-            println!("[Silent] Failed to refresh account {}: {}", id, e);
-        } else {
-            println!("[Silent] Refreshed account {}", id);
-        }
+        let _ = manager.refresh_token(&id).await;
     }
 
     // 2. Sync with Trae IDE if it's not running
@@ -1611,16 +1552,10 @@ async fn handle_silent_start() -> anyhow::Result<()> {
                         host: String::new(),
                         region: if account.region.is_empty() { "SG".to_string() } else { account.region },
                     };
-                    if let Err(e) = machine::write_trae_login_info(&login_info) {
-                        println!("[Silent] Failed to write Trae login info: {}", e);
-                    } else {
-                        println!("[Silent] Synced token to Trae IDE for account {}", current.email);
-                    }
+                    let _ = machine::write_trae_login_info(&login_info);
                 }
              }
         }
-    } else {
-        println!("[Silent] Trae IDE is running, skipping sync");
     }
 
     Ok(())
@@ -1629,9 +1564,7 @@ async fn handle_silent_start() -> anyhow::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize logger first
-    if let Err(e) = logger::init_logger() {
-        eprintln!("[ERROR] Failed to initialize logger: {}", e);
-    }
+    let _ = logger::init_logger();
     
     // Set up panic handler
     std::panic::set_hook(Box::new(|info| {
@@ -1666,23 +1599,15 @@ pub fn run() {
         hide_console_window();
         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
         rt.block_on(async {
-            if let Err(e) = handle_silent_start().await {
-                log::error!("[Silent] Error: {}", e);
-                eprintln!("[Silent] Error: {}", e);
-            }
+            let _ = handle_silent_start().await;
         });
         std::process::exit(0);
     }
 
     log::info!("Initializing account manager...");
     let account_manager = AccountManager::new().expect("无法初始化账号管理器");
-    let settings = load_settings_from_disk().unwrap_or_else(|err| {
-        println!("[WARN] 读取设置失败，使用默认值: {}", err);
-        AppSettings::default()
-    });
-    if let Err(err) = autostart::set_auto_start(settings.auto_start_enabled) {
-        println!("[WARN] 设置开机自启动失败: {}", err);
-    }
+    let settings = load_settings_from_disk().unwrap_or_default();
+    let _ = autostart::set_auto_start(settings.auto_start_enabled);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1707,7 +1632,6 @@ pub fn run() {
             finish_browser_login,
             cancel_browser_login,
             browser_auto_login_command,
-            open_browser_register,
             remove_account,
             get_accounts,
             get_account,
@@ -1742,6 +1666,10 @@ pub fn run() {
             export_logs_cmd,
             clear_logs_cmd,
             get_log_file_path_cmd,
+            quick_register_backend::quick_register_create_task,
+            quick_register_backend::quick_register_get_status,
+            quick_register_backend::quick_register_claim_resource,
+            quick_register_backend::quick_register_get_stats,
         ])
         .setup(|app| {
             // 获取主窗口并显示
