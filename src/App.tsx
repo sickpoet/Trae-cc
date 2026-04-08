@@ -184,6 +184,11 @@ function App() {
             privacy_auto_enable: true,
             auto_start_enabled: false,
             api_key: "9201",
+            custom_tempmail_config: {
+              api_url: "",
+              secret_key: "",
+              email_domain: "",
+            },
           });
         }
       });

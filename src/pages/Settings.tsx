@@ -20,8 +20,6 @@ export function Settings({
   const [traePath, setTraePath] = useState<string>("");
   const [traePathLoading, setTraePathLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [showSecretKey, setShowSecretKey] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
   
   // 清除登录状态确认对话框
   const [showClearConfirm, setShowClearConfirm] = useState(false);

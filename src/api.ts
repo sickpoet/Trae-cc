@@ -8,7 +8,7 @@ const APP_ID = import.meta.env.VITE_APP_ID || "";
 const APP_SECRET = import.meta.env.VITE_APP_SECRET || "";
 
 // 验证配置是否有效
-function checkApiConfig(): boolean {
+export function checkApiConfig(): boolean {
   return !!(QUICK_REGISTER_API_BASE && APP_ID && APP_SECRET);
 }
 
