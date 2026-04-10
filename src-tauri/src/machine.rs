@@ -1094,7 +1094,7 @@ pub fn delete_account_context_backup(account_id: &str) -> Result<()> {
 }
 
 /// 合并两个账号的对话记录到目标账号的备份中
-/// 这会将当前账号的 workspaceStorage 中的对话合并到目标账号的备份
+/// 这会将当前账号的 workspaceStorage 和 state.vscdb 中的对话合并到目标账号的备份
 /// 然后在切换时恢复这个合并后的备份
 pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &str) -> Result<()> {
     let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
@@ -1112,23 +1112,46 @@ pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &
     let current_backup_dir = proj_dirs.data_dir().join("account_contexts").join(current_account_id);
     let workspace_src = current_backup_dir.join("workspaceStorage");
     
-    if !workspace_src.exists() {
-        println!("[INFO] 当前账号 {} 没有对话记录，无需合并", current_account_id);
-        return Ok(());
+    let mut total_merged = 0;
+    
+    // 1. 合并 workspaceStorage
+    if workspace_src.exists() {
+        match merge_workspace_storage(&workspace_src, &target_workspace) {
+            Ok(count) => {
+                println!("[INFO] 已合并账号 {} 的 {} 个 workspace 对话记录", current_account_id, count);
+                total_merged += count;
+            }
+            Err(e) => {
+                println!("[WARN] 合并账号 {} 的 workspace 对话记录失败: {}", current_account_id, e);
+            }
+        }
+    } else {
+        println!("[INFO] 当前账号 {} 没有 workspace 对话记录", current_account_id);
     }
     
-    // 合并 workspaceStorage 到目标账号的备份
-    match merge_workspace_storage(&workspace_src, &target_workspace) {
-        Ok(count) => {
-            println!("[INFO] 已合并账号 {} 的 {} 个对话记录到目标账号", current_account_id, count);
-            println!("[INFO] 对话合并完成");
-            Ok(())
+    // 2. 合并 state.vscdb（SQLite 数据库文件）
+    // 策略：如果目标没有 state.vscdb，直接复制；如果有，保留目标的（因为无法简单合并 SQLite）
+    let current_state = current_backup_dir.join("state.vscdb");
+    let target_state = target_backup_dir.join("state.vscdb");
+    
+    if current_state.exists() && !target_state.exists() {
+        // 目标没有 state.vscdb，复制当前的
+        match fs::copy(&current_state, &target_state) {
+            Ok(_) => {
+                println!("[INFO] 已复制当前账号的 state.vscdb 到目标账号备份");
+                total_merged += 1;
+            }
+            Err(e) => {
+                println!("[WARN] 复制 state.vscdb 失败: {}", e);
+            }
         }
-        Err(e) => {
-            println!("[WARN] 合并账号 {} 的对话记录失败: {}", current_account_id, e);
-            Err(e)
-        }
+    } else if current_state.exists() && target_state.exists() {
+        // 两者都有 state.vscdb，保留目标的（因为 SQLite 无法简单合并）
+        println!("[INFO] 目标账号已有 state.vscdb，保留目标的数据库文件");
     }
+    
+    println!("[INFO] 对话合并完成，共处理 {} 个记录/文件", total_merged);
+    Ok(())
 }
 
 /// 合并两个 workspaceStorage 目录

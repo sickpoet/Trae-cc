@@ -67,12 +67,10 @@ export function ContextMenu({
               <span className="icon">🔀</span>
               切换账号
             </div>
-            {onSwitchAccountWithMerge && (
-              <div className="context-menu-item" onClick={onSwitchAccountWithMerge}>
-                <span className="icon">🌐</span>
-                切换账号（对话互通）
-              </div>
-            )}
+            <div className="context-menu-item" onClick={onSwitchAccountWithMerge}>
+              <span className="icon">🌐</span>
+              切换账号（对话互通）
+            </div>
           </>
         )}
         <div className="context-menu-item" onClick={onRefresh}>

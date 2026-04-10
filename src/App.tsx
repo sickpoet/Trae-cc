@@ -542,7 +542,7 @@ function App() {
           console.log(`[SwitchAccount] 账号切换完成`);
           
           // 5. 恢复新账号的上下文（如果有备份）
-          console.log(`[SwitchAccount] 检查新账号是否有备份...`);
+          console.log(`[SwitchAccount] 检查新账号 ${accountId} 是否有备份...`);
           try {
             const hasBackup = await api.hasAccountContextBackup(accountId);
             console.log(`[SwitchAccount] 新账号 ${accountId} 是否有备份:`, hasBackup);
