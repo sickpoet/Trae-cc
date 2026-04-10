@@ -163,7 +163,10 @@ impl AccountManager {
                 existing_account.jwt_token = Some(token_result.token);
                 existing_account.token_expired_at = Some(token_result.expired_at);
                 existing_account.name = user_info.screen_name.clone();
-                existing_account.email = user_info.non_plain_text_email.unwrap_or_default();
+                // 只在没有现有邮箱或现有邮箱为空时才使用 API 返回的邮箱
+                if existing_account.email.trim().is_empty() {
+                    existing_account.email = user_info.non_plain_text_email.unwrap_or_default();
+                }
                 existing_account.avatar_url = user_info.avatar_url.clone();
                 existing_account.region = user_info.region.clone();
                 existing_account.tenant_id = token_result.tenant_id.clone();
@@ -270,7 +273,8 @@ impl AccountManager {
                 if !name.trim().is_empty() {
                     existing_account.name = name;
                 }
-                if !email.trim().is_empty() {
+                // 只在没有现有邮箱或现有邮箱为空时才更新邮箱
+                if existing_account.email.trim().is_empty() && !email.trim().is_empty() {
                     existing_account.email = email;
                 }
                 if !avatar_url.trim().is_empty() {
@@ -389,7 +393,8 @@ impl AccountManager {
                 if !name.trim().is_empty() {
                     acc.name = name;
                 }
-                if !email.trim().is_empty() {
+                // 只在没有现有邮箱或现有邮箱为空时才更新邮箱
+                if acc.email.trim().is_empty() && !email.trim().is_empty() {
                     acc.email = email;
                 }
                 if !avatar_url.trim().is_empty() {
@@ -969,16 +974,18 @@ impl AccountManager {
     /// 导出账号数据（只包含邮箱和密码）
     pub fn export_accounts(&self) -> Result<String> {
         let export_data: Vec<serde_json::Value> = self.store.accounts.iter().filter_map(|acc| {
-            // 检查邮箱是否脱敏（包含*号），如果是则跳过
-            let email = if acc.email.contains('*') || acc.email.trim().is_empty() {
+            // 只跳过邮箱完全为空的账号
+            if acc.email.trim().is_empty() {
                 return None;
-            } else {
-                acc.email.clone()
-            };
+            }
+
+            // 只导出邮箱和密码，如果密码为空则跳过
+            if acc.password.is_none() || acc.password.as_ref().unwrap().trim().is_empty() {
+                return None;
+            }
             
-            // 只导出邮箱和密码
             Some(serde_json::json!({
-                "email": email,
+                "email": acc.email.clone(),
                 "password": acc.password.clone().unwrap_or_default(),
             }))
         }).collect();
@@ -988,8 +995,9 @@ impl AccountManager {
     }
 
     /// 导入账号数据（支持邮箱密码自动登录）
-    pub async fn import_accounts(&mut self, data: &str) -> Result<usize> {
-        #[derive(serde::Deserialize)]
+    /// 返回 (成功导入数量, 成功账号列表, 失败账号列表[(邮箱, 密码, 原因)])
+    pub async fn import_accounts(&mut self, data: &str) -> Result<(usize, Vec<String>, Vec<(String, String, String)>)> {
+        #[derive(serde::Deserialize, Clone)]
         struct ImportItem {
             email: String,
             password: String,
@@ -1000,16 +1008,23 @@ impl AccountManager {
 
         println!("[AccountManager] 开始导入 {} 个账号", import_data.len());
         
+        // 初始化结果列表
+        let mut success_accounts: Vec<String> = Vec::new();
+        let mut failed_accounts: Vec<(String, String, String)> = Vec::new();
+        
         // 限制并发数为 3，避免触发限流
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
         let mut tasks = Vec::new();
         
-        for item in import_data {
+        for (index, item) in import_data.iter().enumerate() {
             let email = item.email.trim().to_string();
-            let password = item.password;
+            let password = item.password.clone();
+            
+            println!("[AccountManager] 处理第 {} 个账号: {}", index + 1, email);
             
             if email.is_empty() || password.is_empty() {
-                println!("[AccountManager] 跳过空邮箱或密码");
+                println!("[AccountManager] 跳过空邮箱或密码: {}", email);
+                failed_accounts.push((email, password, "邮箱或密码为空".to_string()));
                 continue;
             }
             
@@ -1019,26 +1034,20 @@ impl AccountManager {
             
             if existing {
                 println!("[AccountManager] 账号已存在，跳过: {}", email);
+                failed_accounts.push((email, password, "账号已存在".to_string()));
                 continue;
             }
             
             let semaphore_clone = semaphore.clone();
+            let item_clone = item.clone();
             
             tasks.push(tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-                println!("[AccountManager] 正在登录: {}", email);
+                println!("[AccountManager] 正在登录: {}", item_clone.email);
                 
-                // 使用邮箱密码登录
-                match login_with_email(&email, &password).await {
-                    Ok(login_result) => {
-                        println!("[AccountManager] 登录成功: {}", email);
-                        Some((login_result, email, password))
-                    }
-                    Err(e) => {
-                        println!("[AccountManager] 登录失败 {}: {}", email, e);
-                        None
-                    }
-                }
+                // 使用邮箱密码登录，返回 Result 包含所有信息
+                let result = login_with_email(&item_clone.email, &item_clone.password).await;
+                (result, item_clone.email, item_clone.password)
             }));
         }
 
@@ -1046,66 +1055,80 @@ impl AccountManager {
         let mut imported_count = 0;
         
         for task in tasks {
-            if let Ok(Some((login_result, email, password))) = task.await {
-                // 检查是否已存在（再次检查，避免并发重复）
-                if self.store.accounts.iter().any(|a| a.user_id == login_result.user_id) {
-                    println!("[AccountManager] 账号已存在（user_id 重复）: {}", email);
-                    continue;
-                }
-                
-                // 使用 Token 获取完整用户信息和使用量
-                match TraeApiClient::new_with_token(&login_result.token) {
-                    Ok(client) => {
-                        // 并行获取用户信息和用量
-                        let user_info_future = client.get_user_info_by_token();
-                        let usage_future = client.get_usage_summary_by_token();
-                        
-                        match tokio::join!(user_info_future, usage_future) {
-                            (Ok(user_info), Ok(usage)) => {
-                                let mut account = Account::new(
-                                    user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
-                                    email.clone(),
-                                    login_result.cookies,
-                                    login_result.user_id,
-                                    login_result.tenant_id,
-                                );
-                                
-                                account.avatar_url = user_info.avatar_url.unwrap_or_default();
-                                account.jwt_token = Some(login_result.token);
-                                account.token_expired_at = Some(login_result.expired_at);
-                                account.password = Some(password);
-                                account.plan_type = usage.plan_type;
-                                
-                                self.store.accounts.push(account);
-                                imported_count += 1;
-                                println!("[AccountManager] 账号导入成功: {} (用量已获取)", email);
+            if let Ok((login_result, email, password)) = task.await {
+                match login_result {
+                    Ok(login_result) => {
+                            // 检查是否已存在（再次检查，避免并发重复）
+                            if self.store.accounts.iter().any(|a| a.user_id == login_result.user_id) {
+                                println!("[AccountManager] 账号已存在（user_id 重复）: {}", email);
+                                failed_accounts.push((email, password, "账号已存在".to_string()));
+                                continue;
                             }
-                            (Ok(user_info), Err(e)) => {
-                                // 获取用量失败，但仍创建账号
-                                let mut account = Account::new(
-                                    user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
-                                    email.clone(),
-                                    login_result.cookies,
-                                    login_result.user_id,
-                                    login_result.tenant_id,
-                                );
-                                
-                                account.avatar_url = user_info.avatar_url.unwrap_or_default();
-                                account.jwt_token = Some(login_result.token);
-                                account.token_expired_at = Some(login_result.expired_at);
-                                account.password = Some(password);
-                                
-                                self.store.accounts.push(account);
-                                imported_count += 1;
-                                println!("[AccountManager] 账号导入成功: {} (用量获取失败: {})", email, e);
-                            }
-                            (Err(e), _) => {
-                                println!("[AccountManager] 获取用户信息失败 {}: {}", email, e);
+                            
+                            // 使用 Token 获取完整用户信息和使用量
+                            match TraeApiClient::new_with_token(&login_result.token) {
+                                Ok(client) => {
+                                    // 并行获取用户信息和用量
+                                    let user_info_future = client.get_user_info_by_token();
+                                    let usage_future = client.get_usage_summary_by_token();
+                                    
+                                    match tokio::join!(user_info_future, usage_future) {
+                                        (Ok(user_info), Ok(usage)) => {
+                                            let mut account = Account::new(
+                                                user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
+                                                email.clone(),
+                                                login_result.cookies,
+                                                login_result.user_id,
+                                                login_result.tenant_id,
+                                            );
+                                            
+                                            account.avatar_url = user_info.avatar_url.unwrap_or_default();
+                                            account.jwt_token = Some(login_result.token);
+                                            account.token_expired_at = Some(login_result.expired_at);
+                                            account.password = Some(password);
+                                            account.plan_type = usage.plan_type;
+                                            
+                                            self.store.accounts.push(account);
+                                            imported_count += 1;
+                                            success_accounts.push(email.clone());
+                                            println!("[AccountManager] 账号导入成功: {} (用量已获取)", email);
+                                        }
+                                        (Ok(user_info), Err(e)) => {
+                                            // 获取用量失败，但仍创建账号
+                                            let mut account = Account::new(
+                                                user_info.screen_name.unwrap_or_else(|| email.split('@').next().unwrap_or("User").to_string()),
+                                                email.clone(),
+                                                login_result.cookies,
+                                                login_result.user_id,
+                                                login_result.tenant_id,
+                                            );
+                                            
+                                            account.avatar_url = user_info.avatar_url.unwrap_or_default();
+                                            account.jwt_token = Some(login_result.token);
+                                            account.token_expired_at = Some(login_result.expired_at);
+                                            account.password = Some(password);
+                                            
+                                            self.store.accounts.push(account);
+                                            imported_count += 1;
+                                            success_accounts.push(email.clone());
+                                            println!("[AccountManager] 账号导入成功: {} (用量获取失败: {})", email, e);
+                                        }
+                                        (Err(e), _) => {
+                                            println!("[AccountManager] 获取用户信息失败 {}: {}", email, e);
+                                            failed_accounts.push((email, password, format!("获取用户信息失败: {}", e)));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("[AccountManager] 创建 API 客户端失败 {}: {}", email, e);
+                                    failed_accounts.push((email, password, format!("创建 API 客户端失败: {}", e)));
+                                }
                             }
                         }
-                    }
                     Err(e) => {
-                        println!("[AccountManager] 创建 API 客户端失败 {}: {}", email, e);
+                        // 登录失败
+                        println!("[AccountManager] 登录失败 {}: {}", email, e);
+                        failed_accounts.push((email, password, format!("登录失败: {}", e)));
                     }
                 }
             }
@@ -1121,7 +1144,7 @@ impl AccountManager {
         }
 
         println!("[AccountManager] 导入完成，成功导入 {} 个账号", imported_count);
-        Ok(imported_count)
+        Ok((imported_count, success_accounts, failed_accounts))
     }
 
     /// 获取使用事件
@@ -1418,25 +1441,84 @@ impl AccountManager {
         }
         Ok(())
     }
-}
 
-async fn fetch_account_info_internal(cookies: String, password: Option<String>) -> Result<Account> {
-    let mut client = TraeApiClient::new(&cookies)?;
-    let token_result = client.get_user_token().await?;
-    let user_info = client.get_user_info().await?;
-    
-    let mut account = Account::new(
-        user_info.screen_name.clone(),
-        user_info.non_plain_text_email.unwrap_or_default(),
-        cookies,
-        token_result.user_id,
-        token_result.tenant_id,
-    );
-    account.avatar_url = user_info.avatar_url;
-    account.region = user_info.region;
-    account.jwt_token = Some(token_result.token);
-    account.token_expired_at = Some(token_result.expired_at);
-    account.password = password;
-    
-    Ok(account)
+    /// 检测 Token 无效的账号（不删除，只返回列表）
+    /// 返回无效账号的 ID 列表
+    pub async fn check_invalid_token_accounts(&self) -> Result<Vec<(String, String, String)>> {
+        let mut invalid_accounts: Vec<(String, String, String)> = Vec::new(); // (id, name, email)
+        
+        for account in &self.store.accounts {
+            let is_valid = if let Some(ref t) = account.jwt_token {
+                // 有 Token，验证是否有效
+                match TraeApiClient::new_with_token(t) {
+                    Ok(client) => {
+                        match client.get_usage_summary_by_token().await {
+                            Ok(_) => true,
+                            Err(e) => {
+                                let error_msg = e.to_string();
+                                // 401 错误表示 Token 无效
+                                !error_msg.contains("401")
+                            }
+                        }
+                    }
+                    Err(_) => false,
+                }
+            } else if !account.cookies.is_empty() {
+                // 没有 Token 但有 Cookies，尝试获取 Token
+                match TraeApiClient::new(&account.cookies) {
+                    Ok(mut client) => {
+                        match client.get_user_token().await {
+                            Ok(_) => true,
+                            Err(e) => {
+                                let error_msg = e.to_string();
+                                !error_msg.contains("401")
+                            }
+                        }
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                // 既没有 Token 也没有 Cookies，视为无效
+                false
+            };
+            
+            if !is_valid {
+                println!("[AccountManager] 检测到无效账号: {} ({})", account.name, account.email);
+                invalid_accounts.push((account.id.clone(), account.name.clone(), account.email.clone()));
+            }
+        }
+        
+        Ok(invalid_accounts)
+    }
+
+    /// 删除指定的无效账号
+    pub fn remove_accounts_by_ids(&mut self, account_ids: &[String]) -> Result<Vec<(String, String)>> {
+        let mut deleted_accounts: Vec<(String, String)> = Vec::new();
+        
+        for id in account_ids {
+            if let Some(index) = self.store.accounts.iter().position(|a| a.id == *id) {
+                let account = self.store.accounts.remove(index);
+                let name = account.name.clone();
+                let email = account.email.clone();
+                deleted_accounts.push((name.clone(), email.clone()));
+                println!("[AccountManager] 已删除无效账号: {} ({})", name, email);
+            }
+            
+            // 如果删除的是活跃账号，重置活跃账号
+            if self.store.active_account_id.as_deref() == Some(id) {
+                self.store.active_account_id = self.store.accounts.first().map(|a| a.id.clone());
+            }
+            
+            // 如果删除的是当前账号，重置当前账号
+            if self.store.current_account_id.as_deref() == Some(id) {
+                self.store.current_account_id = None;
+            }
+        }
+        
+        if !deleted_accounts.is_empty() {
+            self.save_store()?;
+        }
+        
+        Ok(deleted_accounts)
+    }
 }

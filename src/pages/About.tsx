@@ -4,6 +4,49 @@ interface AboutProps {
   onToast?: (type: "success" | "error" | "warning" | "info", message: string, duration?: number) => void;
 }
 
+// SVG Icons
+const icons = {
+  chat: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+    </svg>
+  ),
+  coffee: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
+      <path d="M18 8h1a4 4 0 0 1 0 8h-1"/>
+      <path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/>
+      <line x1="6" y1="1" x2="6" y2="4"/>
+      <line x1="10" y1="1" x2="10" y2="4"/>
+      <line x1="14" y1="1" x2="14" y2="4"/>
+    </svg>
+  ),
+  qrcode: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
+      <rect x="3" y="3" width="7" height="7"/>
+      <rect x="14" y="3" width="7" height="7"/>
+      <rect x="14" y="14" width="7" height="7"/>
+      <rect x="3" y="14" width="7" height="7"/>
+    </svg>
+  ),
+  copy: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+    </svg>
+  ),
+  close: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="20" height="20">
+      <line x1="18" y1="6" x2="6" y2="18"/>
+      <line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>
+  ),
+  heart: (
+    <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" width="14" height="14">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+    </svg>
+  ),
+};
+
 export function About({ onToast }: AboutProps) {
   const [showQrModal, setShowQrModal] = useState<string | null>(null);
 
@@ -100,7 +143,7 @@ export function About({ onToast }: AboutProps) {
         {/* 售后支持 */}
         <div className="about-support-section">
           <div className="about-support-header">
-            <div className="about-support-icon">💬</div>
+            <div className="about-support-icon">{icons.chat}</div>
             <div className="about-support-title">售后支持</div>
           </div>
           <div className="about-support-content">
@@ -112,12 +155,7 @@ export function About({ onToast }: AboutProps) {
               className="about-support-btn copy"
               title="查看群二维码"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="3" width="7" height="7"/>
-                <rect x="14" y="3" width="7" height="7"/>
-                <rect x="14" y="14" width="7" height="7"/>
-                <rect x="3" y="14" width="7" height="7"/>
-              </svg>
+              {icons.qrcode}
               复制群号
             </button>
             <a
@@ -137,7 +175,7 @@ export function About({ onToast }: AboutProps) {
         {/* 赞助支持 */}
         <div className="about-sponsor-section">
           <div className="about-sponsor-header">
-            <div className="about-sponsor-icon">☕</div>
+            <div className="about-sponsor-icon">{icons.coffee}</div>
             <div className="about-sponsor-title">赞助支持</div>
           </div>
           <div className="about-sponsor-content">
@@ -177,7 +215,7 @@ export function About({ onToast }: AboutProps) {
         
         {/* 页脚 */}
         <div className="about-footer">
-          Made with ❤️ by HJH · MIT License
+          Made with {icons.heart} by HJH · MIT License
         </div>
       </div>
 
@@ -193,14 +231,13 @@ export function About({ onToast }: AboutProps) {
                   onClick={handleCopyQQ}
                   title="复制群号"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                  </svg>
+                  {icons.copy}
                   复制群号
                 </button>
               )}
-              <button className="qr-modal-close" onClick={closeQrModal}>×</button>
+              <button className="qr-modal-close" onClick={closeQrModal} aria-label="关闭">
+                {icons.close}
+              </button>
             </div>
             <div className="qr-modal-body">
               <img 

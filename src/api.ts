@@ -197,9 +197,44 @@ export async function exportAccountsToPath(path: string): Promise<void> {
   return invoke("export_accounts_to_path", { path });
 }
 
+// 导入账号结果
+export interface ImportAccountsResult {
+  count: number;
+  success: string[];
+  failed: [string, string, string][]; // [邮箱, 密码, 原因]
+}
+
 // 导入账号
-export async function importAccounts(data: string): Promise<number> {
+export async function importAccounts(data: string): Promise<ImportAccountsResult> {
   return invoke("import_accounts", { data });
+}
+
+// 备份账号的 Trae 上下文数据
+export async function backupAccountContext(accountId: string): Promise<string> {
+  return invoke("backup_account_context", { accountId });
+}
+
+// 恢复账号的 Trae 上下文数据
+export async function restoreAccountContext(accountId: string): Promise<void> {
+  return invoke("restore_account_context", { accountId });
+}
+
+// 检查账号是否有上下文备份
+export async function hasAccountContextBackup(accountId: string): Promise<boolean> {
+  return invoke("has_account_context_backup", { accountId });
+}
+
+// 删除账号的上下文备份
+export async function deleteAccountContextBackup(accountId: string): Promise<void> {
+  return invoke("delete_account_context_backup", { accountId });
+}
+
+// 合并两个账号的对话记录（当前账号的对话合并到目标账号）
+export async function mergeTwoAccountsContext(
+  currentAccountId: string,
+  targetAccountId: string
+): Promise<void> {
+  return invoke("merge_two_accounts_context", { currentAccountId, targetAccountId });
 }
 
 export async function clearAccounts(): Promise<number> {
@@ -376,6 +411,23 @@ export interface StatsResponse {
 export async function getQuickRegisterStats(): Promise<StatsResponse> {
   // 通过 Tauri 命令调用 Rust 后端，绕过 CORS 限制
   return invoke("quick_register_get_stats");
+}
+
+/**
+ * 检测 Token 无效的账号（只检测，不删除）
+ * @returns 无效账号列表 [(id, name, email), ...]
+ */
+export async function checkInvalidAccounts(): Promise<[string, string, string][]> {
+  return invoke("check_invalid_accounts");
+}
+
+/**
+ * 删除指定的账号
+ * @param accountIds 要删除的账号 ID 列表
+ * @returns 被删除的账号列表 [(name, email), ...]
+ */
+export async function removeAccountsByIds(accountIds: string[]): Promise<[string, string][]> {
+  return invoke("remove_accounts_by_ids", { accountIds });
 }
 
 /**

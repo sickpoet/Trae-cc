@@ -10,6 +10,7 @@ interface ContextMenuProps {
   onUpdateToken: () => void;
   onCopyToken: () => void;
   onSwitchAccount: () => void;
+  onSwitchAccountWithMerge?: () => void; // 切换账号并合并对话
   onBuyPro: () => void;
   onDelete: () => void;
   isCurrent?: boolean; // 是否是当前使用的账号
@@ -25,6 +26,7 @@ export function ContextMenu({
   onUpdateToken,
   onCopyToken,
   onSwitchAccount,
+  onSwitchAccountWithMerge,
   onBuyPro,
   onDelete,
   isCurrent = false,
@@ -60,10 +62,18 @@ export function ContextMenu({
             重新登录
           </div>
         ) : (
-          <div className="context-menu-item" onClick={onSwitchAccount}>
-            <span className="icon">🔀</span>
-            切换账号
-          </div>
+          <>
+            <div className="context-menu-item" onClick={onSwitchAccount}>
+              <span className="icon">🔀</span>
+              切换账号
+            </div>
+            {onSwitchAccountWithMerge && (
+              <div className="context-menu-item" onClick={onSwitchAccountWithMerge}>
+                <span className="icon">🌐</span>
+                切换账号（对话互通）
+              </div>
+            )}
+          </>
         )}
         <div className="context-menu-item" onClick={onRefresh}>
           <span className="icon">🔄</span>

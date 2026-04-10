@@ -177,7 +177,7 @@ pub fn clear_logs() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Log panic information
-pub fn log_panic(info: &std::panic::PanicInfo) {
+pub fn log_panic(info: &std::panic::PanicHookInfo) {
     log::error!("PANIC: {}", info);
     
     // Also write to a separate crash log

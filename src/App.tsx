@@ -82,14 +82,14 @@ function App() {
 
 
 
-  // 添加 Toast 通知
+  // 添加 Toast 通知，返回 Toast ID
   const addToast = useCallback(
-    (type: ToastMessage["type"], message: string, duration?: number, dedupeKey?: string) => {
+    (type: ToastMessage["type"], message: string, duration?: number, dedupeKey?: string): string => {
       if (dedupeKey) {
         const now = Date.now();
         const last = toastDedupRef.current.get(dedupeKey);
         if (last && now - last < 800) {
-          return;
+          return "";
         }
         toastDedupRef.current.set(dedupeKey, now);
       }
@@ -98,6 +98,7 @@ function App() {
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       setToasts((prev) => [...prev, { id, type, message, duration }]);
+      return id;
     },
     []
   );
@@ -464,7 +465,7 @@ function App() {
   // 切换账号 / 重新登录（同逻辑）
   const handleSwitchAccount = async (
     accountId: string,
-    options?: { mode?: "switch" | "relogin"; force?: boolean }
+    options?: { mode?: "switch" | "relogin"; force?: boolean; mergeContext?: boolean }
   ) => {
     const account = accounts.find((a) => a.id === accountId);
     if (!account) return;
@@ -478,11 +479,12 @@ function App() {
 
     const mode = options?.mode ?? "switch";
     const force = options?.force ?? mode === "relogin";
+    const mergeContext = options?.mergeContext ?? false;
     const title = mode === "relogin" ? "重新登录" : "切换账号";
     const message =
       mode === "relogin"
         ? `确定要重新登录账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并重新写入登录信息。`
-        : `确定要切换到账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并切换登录信息。`;
+        : `确定要切换到账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并切换登录信息。${mergeContext ? "\n\n【对话互通模式】将合并所有账号的聊天记录。" : ""}`;
     const infoToast = mode === "relogin" ? "正在重新登录，请稍候..." : "正在切换账号，请稍候...";
     const successToast = mode === "relogin" ? "账号重新登录完成" : "账号切换成功";
     const errorToast = mode === "relogin" ? "重新登录失败" : "切换账号失败";
@@ -496,7 +498,69 @@ function App() {
         setConfirmModal(null);
         addToast("info", infoToast);
         try {
+          // 1. 获取当前活跃账号（用于备份）
+          const currentAccount = accounts.find(a => a.is_active);
+          console.log(`[SwitchAccount] 当前活跃账号:`, currentAccount?.id, currentAccount?.email);
+          console.log(`[SwitchAccount] 目标账号ID:`, accountId);
+          
+          // 2. 如果有当前活跃账号，先备份其上下文
+          if (currentAccount && currentAccount.id !== accountId) {
+            console.log(`[SwitchAccount] 需要备份当前账号上下文`);
+            try {
+              addToast("info", `正在备份当前账号的上下文...`, undefined, `backup-${currentAccount.id}`);
+              console.log(`[SwitchAccount] 开始备份账号 ${currentAccount.id}...`);
+              await api.backupAccountContext(currentAccount.id);
+              console.log(`[SwitchAccount] 已备份账号 ${currentAccount.id} 的上下文`);
+              addToast("success", `已备份当前账号上下文`);
+            } catch (backupErr: any) {
+              console.error(`[SwitchAccount] 备份当前账号上下文失败:`, backupErr);
+              addToast("warning", `备份当前账号上下文失败: ${backupErr.message}`);
+              // 备份失败不阻止切换
+            }
+          } else {
+            console.log(`[SwitchAccount] 无需备份: currentAccount=${currentAccount?.id}, sameAccount=${currentAccount?.id === accountId}`);
+          }
+          
+          // 3. 如果启用了对话互通模式，先合并当前账号的对话到目标账号的备份
+          if (mergeContext && currentAccount && currentAccount.id !== accountId) {
+            console.log(`[SwitchAccount] 启用了对话互通模式，合并当前账号 ${currentAccount.id} 的对话到目标账号 ${accountId}...`);
+            try {
+              addToast("info", `正在合并聊天记录...`, undefined, `merge-context`);
+              await api.mergeTwoAccountsContext(currentAccount.id, accountId);
+              console.log(`[SwitchAccount] 对话合并完成，已合并到目标账号备份`);
+              addToast("success", `已合并聊天记录`);
+            } catch (mergeErr: any) {
+              console.error(`[SwitchAccount] 合并对话失败:`, mergeErr);
+              addToast("warning", `合并聊天记录失败: ${mergeErr.message}`);
+              // 合并失败不阻止切换
+            }
+          }
+          
+          // 4. 执行账号切换
+          console.log(`[SwitchAccount] 开始执行账号切换...`);
           await api.switchAccount(accountId, { force });
+          console.log(`[SwitchAccount] 账号切换完成`);
+          
+          // 5. 恢复新账号的上下文（如果有备份）
+          console.log(`[SwitchAccount] 检查新账号是否有备份...`);
+          try {
+            const hasBackup = await api.hasAccountContextBackup(accountId);
+            console.log(`[SwitchAccount] 新账号 ${accountId} 是否有备份:`, hasBackup);
+            if (hasBackup) {
+              addToast("info", `正在恢复账号的上下文...`, undefined, `restore-${accountId}`);
+              console.log(`[SwitchAccount] 开始恢复账号 ${accountId} 的上下文...`);
+              await api.restoreAccountContext(accountId);
+              console.log(`[SwitchAccount] 已恢复账号 ${accountId} 的上下文`);
+              addToast("success", `已恢复账号上下文`);
+            } else {
+              console.log(`[SwitchAccount] 新账号 ${accountId} 没有备份，跳过恢复`);
+            }
+          } catch (restoreErr: any) {
+            console.error(`[SwitchAccount] 恢复新账号上下文失败:`, restoreErr);
+            addToast("warning", `恢复新账号上下文失败: ${restoreErr.message}`);
+            // 恢复失败不阻止切换
+          }
+          
           await loadAccounts();
           addToast("success", successToast);
         } catch (err: any) {
@@ -561,7 +625,6 @@ function App() {
       }
       const account = await api.getAccount(accountId);
       const email = account.email || account.name;
-      const maskedEmail = account.email?.includes("*") ?? false;
 
       if (!options?.forceManual) {
         if (account.cookies) {
@@ -573,7 +636,7 @@ function App() {
           } catch {}
         }
 
-        if (account.password && account.email && !maskedEmail) {
+        if (account.password && account.email) {
           try {
             await api.refreshTokenWithPassword(accountId, account.password);
             await handleRefreshAccount(accountId, { silent: true });
@@ -606,7 +669,7 @@ function App() {
       setLoginModal({
         accountId,
         accountName: email,
-        initialEmail: maskedEmail ? "" : account.email,
+        initialEmail: account.email,
       });
     } catch (err: any) {
       addToast("error", err.message || "重新登录失败");
@@ -695,9 +758,66 @@ function App() {
       if (!file) return;
 
       try {
+        console.log("[Import] 导入文件:", file.name);
         const text = await file.text();
-        const count = await api.importAccounts(text);
-        addToast("success", `成功导入 ${count} 个账号`);
+        
+        // 解析并显示要导入的账号数量
+        let totalAccounts = 0;
+        try {
+          const parsed = JSON.parse(text);
+          if (Array.isArray(parsed)) {
+            totalAccounts = parsed.length;
+            console.log(`[Import] 文件包含 ${parsed.length} 个账号`);
+            if (parsed.length > 0 && parsed[0].email) {
+              console.log("[Import] 第一个账号:", parsed[0].email);
+            }
+          }
+        } catch (e) {
+          console.warn("[Import] 无法预览文件内容");
+        }
+        
+        // 显示"正在导入"提示（duration: 0表示不自动消失）
+        const importToastId = addToast("info", `正在导入 ${totalAccounts} 个账号，请稍候...`, 0);
+
+        // 导入账号
+        const result = await api.importAccounts(text);
+
+        // 导入完成后移除"正在导入"提示并显示结果
+        if (importToastId) {
+          removeToast(importToastId);
+        }
+        if (result.failed.length === 0) {
+          // 全部成功
+          addToast("success", `成功导入 ${result.count} 个账号`);
+        } else if (result.count === 0) {
+          // 全部失败
+          const failedList = result.failed.map(([email, password, reason]) =>
+            `• ${email}\n  密码: ${password}\n  原因: ${reason}`
+          ).join("\n\n");
+          setConfirmModal({
+            isOpen: true,
+            title: "导入失败",
+            message: `所有账号导入失败（共 ${result.failed.length} 个）：\n\n${failedList}`,
+            type: "danger",
+            confirmText: "确定",
+            onConfirm: () => setConfirmModal(null),
+          });
+        } else {
+          // 部分成功
+          const successList = result.success.map(email => `• ${email}`).join("\n");
+          const failedList = result.failed.map(([email, password, reason]) =>
+            `• ${email}\n  密码: ${password}\n  原因: ${reason}`
+          ).join("\n\n");
+          setConfirmModal({
+            isOpen: true,
+            title: "导入结果",
+            message: `成功导入 ${result.count} 个账号，失败 ${result.failed.length} 个\n\n✅ 成功：\n${successList}\n\n❌ 失败：\n${failedList}`,
+            type: "warning",
+            confirmText: "确定",
+            onConfirm: () => setConfirmModal(null),
+          });
+        }
+        
         await loadAccounts();
       } catch (err: any) {
         addToast("error", err.message || "导入失败");
@@ -746,6 +866,59 @@ function App() {
         setConfirmModal(null);
       },
     });
+  };
+
+  // 检测并选中无效账号
+  const handleCheckInvalidAccounts = async () => {
+    addToast("info", "正在检测账号有效性...");
+    try {
+      const invalidAccounts = await api.checkInvalidAccounts();
+      if (invalidAccounts.length === 0) {
+        addToast("success", "所有账号均有效");
+      } else {
+        // 自动选中无效账号
+        const invalidIds = new Set(invalidAccounts.map(([id]) => id));
+        setSelectedIds(invalidIds);
+        
+        // 显示确认删除对话框
+        const accountList = invalidAccounts.map(([, name, email]) => {
+          const displayName = name || email || "未知账号";
+          return `• ${displayName}`;
+        }).join("\n");
+        
+        setConfirmModal({
+          isOpen: true,
+          title: "检测到无效账号",
+          message: `已自动选中 ${invalidAccounts.length} 个 Token 无效的账号：\n\n${accountList}\n\n是否删除这些账号？`,
+          type: "danger",
+          confirmText: "删除选中账号",
+          cancelText: "取消",
+          onConfirm: () => {
+            setConfirmModal(null);
+            // 执行删除
+            handleDeleteSelectedInvalidAccounts(invalidIds);
+          },
+        });
+      }
+    } catch (err: any) {
+      addToast("error", err.message || "检测失败");
+    }
+  };
+
+  // 删除选中的无效账号
+  const handleDeleteSelectedInvalidAccounts = async (invalidIds: Set<string>) => {
+    try {
+      const idsToDelete = Array.from(invalidIds);
+      const deletedAccounts = await api.removeAccountsByIds(idsToDelete);
+      
+      // 更新账号列表
+      setAccounts((prev) => prev.filter((account) => !invalidIds.has(account.id)));
+      setSelectedIds(new Set());
+      
+      addToast("success", `已删除 ${deletedAccounts.length} 个无效账号`);
+    } catch (err: any) {
+      addToast("error", err.message || "删除失败");
+    }
   };
 
   const normalizedFilter = (emailFilter || "").trim().toLowerCase();
@@ -866,6 +1039,27 @@ function App() {
                         </svg>
                       </button>
                     </div>
+                    <button
+                      className="header-btn danger"
+                      onClick={handleCheckInvalidAccounts}
+                      title="检测并选中 Token 无效的账号"
+                      style={{ padding: "6px 10px", marginLeft: "8px", fontSize: "12px" }}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        width="14"
+                        height="14"
+                        style={{ marginRight: "4px", verticalAlign: "middle" }}
+                      >
+                        <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        <line x1="10" y1="11" x2="10" y2="17"/>
+                        <line x1="14" y1="11" x2="14" y2="17"/>
+                      </svg>
+                      清理无效
+                    </button>
                     {selectedIds.size > 0 && (
                       <div className="batch-actions">
                         <button className="batch-btn" onClick={handleBatchRefresh}>
@@ -1025,6 +1219,10 @@ function App() {
             handleSwitchAccount(contextMenu.accountId);
             setContextMenu(null);
           }}
+          onSwitchAccountWithMerge={() => {
+            handleSwitchAccount(contextMenu.accountId, { mergeContext: true });
+            setContextMenu(null);
+          }}
           onBuyPro={() => {
             void handleBuyPro(contextMenu.accountId);
             setContextMenu(null);
@@ -1047,6 +1245,8 @@ function App() {
         onImportAccounts={handleImportAccounts}
         onExportAccounts={handleExportAccounts}
         canExport={accounts.length > 0}
+        settings={appSettings}
+        onSettingsChange={setAppSettings}
       />
 
       {/* 详情弹窗 */}

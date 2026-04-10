@@ -31,7 +31,6 @@ use warp::Filter;
 use account::{AccountBrief, AccountManager, Account};
 use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult};
 // use quick_register_simple::wait_for_request_cookies; // 已禁用快速注册功能
-use anyhow::anyhow;
 
 #[cfg(target_os = "windows")]
 fn hide_console_window() {
@@ -279,14 +278,248 @@ async fn quick_register(_app: AppHandle, _show_window: bool, _state: State<'_, A
 /// 使用自定义临时邮箱进行快速注册
 #[tauri::command]
 async fn quick_register_with_custom_tempmail(
-    _app: AppHandle,
-    _show_window: bool,
-    _state: State<'_, AppState>,
+    app: AppHandle,
+    show_window: bool,
+    state: State<'_, AppState>,
 ) -> Result<Account> {
-    // 此功能需要完整的前端配合，暂时返回提示
-    Err(ApiError::from(anyhow::anyhow!(
-        "自定义临时邮箱快速注册功能开发中，请使用浏览器注册功能手动注册"
-    )))
+    use custom_tempmail::{CustomTempMailClient, generate_password};
+    use reqwest::Url;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::oneshot;
+    use warp::Filter;
+
+    println!("\n========================================");
+    println!("[custom-tempmail] 开始快速注册流程");
+    println!("========================================\n");
+
+    // 检查是否已有浏览器登录在进行中
+    if state.browser_login.lock().await.is_some() {
+        return Err(ApiError::from(anyhow::anyhow!("浏览器登录正在进行中，请稍后再试")));
+    }
+
+    // 获取配置
+    let config = {
+        let settings = state.settings.lock().await;
+        settings.custom_tempmail_config.clone()
+    };
+
+    // 检查配置是否有效
+    if !config.is_valid() {
+        return Err(ApiError::from(anyhow::anyhow!(
+            "自定义临时邮箱配置无效，请在设置中配置 API URL、密钥和邮箱域名"
+        )));
+    }
+
+    // 初始化临时邮箱客户端
+    println!("[custom-tempmail] 初始化临时邮箱客户端...");
+    println!("[custom-tempmail] API URL: {}", config.api_url);
+    let mut mail_client = CustomTempMailClient::new(config);
+
+    let password = generate_password();
+    let email = mail_client.generate_email();
+
+    println!("[custom-tempmail] 邮箱: {}", email);
+    println!("[custom-tempmail] 密码: {}******", &password[..3]);
+
+    // 启动本地回调服务器（用于接收 JS 拦截的 Token）
+    let (token_tx, token_rx) = oneshot::channel::<(String, String)>();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (window_close_tx, window_close_rx) = oneshot::channel::<()>();
+    let (window_close_tx2, window_close_rx2) = oneshot::channel::<()>();
+    let token_sender = Arc::new(StdMutex::new(Some(token_tx)));
+    let shutdown_sender = Arc::new(StdMutex::new(Some(shutdown_tx)));
+    let window_close_sender = Arc::new(StdMutex::new(Some(window_close_tx)));
+    let window_close_sender2 = Arc::new(StdMutex::new(Some(window_close_tx2)));
+
+    let token_sender_route = token_sender.clone();
+    let shutdown_sender_route = shutdown_sender.clone();
+
+    let route = warp::path("callback")
+        .and(warp::query::<HashMap<String, String>>())
+        .map(move |query: HashMap<String, String>| {
+            if let Some(msg) = query.get("log") {
+                println!("[custom-tempmail-js] {}", msg);
+                return warp::reply::html("ok".to_string());
+            }
+
+            let token = query.get("token").cloned().unwrap_or_default();
+            let url = query.get("url").cloned().unwrap_or_default();
+
+            if !token.is_empty() {
+                println!("[custom-tempmail] 收到Token回调");
+                if let Some(tx) = token_sender_route.lock().unwrap().take() {
+                    let _ = tx.send((token, url));
+                }
+                if let Some(tx) = shutdown_sender_route.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                warp::reply::html("已收到 Token，注册成功。".to_string())
+            } else {
+                warp::reply::html("未收到 Token".to_string())
+            }
+        });
+
+    let (addr, server) = warp::serve(route)
+        .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
+            let _ = shutdown_rx.await;
+        });
+    tokio::spawn(server);
+
+    let port = addr.port();
+    println!("[custom-tempmail] 回调服务器启动在端口: {}", port);
+
+    // 准备注册助手脚本
+    let pending_completion: Arc<StdMutex<Option<(String, String)>>> = Arc::new(StdMutex::new(None));
+    let pending_completion_onload = pending_completion.clone();
+    let helper_script = build_register_helper_script(port);
+    let helper_script_onload = helper_script.clone();
+    let helper_script_init = helper_script.clone();
+    let email_onload = email.clone();
+
+    // 关闭已存在的窗口
+    if let Some(existing) = app.get_webview_window("trae-register") {
+        let _ = existing.destroy();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    println!("[custom-tempmail] 创建浏览器窗口...");
+    let webview = WebviewWindowBuilder::new(&app, "trae-register", WebviewUrl::External("about:blank".parse().unwrap()))
+        .title("Trae 注册")
+        .inner_size(1000.0, 720.0)
+        .visible(show_window)
+        .initialization_script(&helper_script_init)
+        .on_page_load(move |window, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let _ = window.eval(helper_script_onload.clone());
+                if let Some((code, password)) = pending_completion_onload.lock().unwrap().clone() {
+                    let code_js = serde_json::to_string(&code).unwrap_or_else(|_| "\"\"".to_string());
+                    let password_js = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
+                    let _ = window.eval(format!(
+                        "window.__traeAutoRegister && window.__traeAutoRegister.complete({}, {});",
+                        code_js, password_js
+                    ));
+                } else {
+                    let email_js = serde_json::to_string(&email_onload).unwrap_or_else(|_| "\"\"".to_string());
+                    let _ = window.eval(format!(
+                        "window.__traeAutoRegister && window.__traeAutoRegister.start({});",
+                        email_js
+                    ));
+                }
+            }
+        })
+        .build()
+        .map_err(|e| ApiError::from(anyhow::anyhow!("无法打开注册窗口: {}", e)))?;
+
+    // 监听窗口关闭事件
+    let window_close_sender_clone = window_close_sender.clone();
+    let window_close_sender_clone2 = window_close_sender2.clone();
+    webview.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            println!("[custom-tempmail] 浏览器窗口被关闭");
+            if let Some(tx) = window_close_sender_clone.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            if let Some(tx) = window_close_sender_clone2.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        }
+    });
+
+    // 清除浏览数据并导航到注册页面
+    let _ = webview.clear_all_browsing_data();
+    let _ = webview.navigate(Url::parse("https://www.trae.ai/sign-up").unwrap());
+
+    // 等待页面加载完成后再执行脚本
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let _ = webview.eval(helper_script.clone());
+    let _ = webview.eval(format!(
+        "if (window.__traeAutoRegister) {{ window.__traeAutoRegister.start({}); }}",
+        serde_json::to_string(&email).unwrap_or_else(|_| "\"\"".to_string())
+    ));
+
+    // 等待验证码邮件（同时监听窗口关闭）
+    println!("[custom-tempmail] 等待验证码邮件...");
+    let code = tokio::select! {
+        result = mail_client.wait_for_code(120) => {
+            match result {
+                Ok(code) => {
+                    println!("[custom-tempmail] 获取验证码: {}", code);
+                    code
+                }
+                Err(err) => {
+                    let _ = webview.close();
+                    return Err(ApiError::from(err));
+                }
+            }
+        }
+        _ = window_close_rx => {
+            return Err(ApiError::from(anyhow::anyhow!("浏览器窗口被关闭，注册取消")));
+        }
+    };
+
+    // 填入验证码和密码
+    *pending_completion.lock().unwrap() = Some((code.clone(), password.clone()));
+    let code_js = serde_json::to_string(&code).unwrap_or_else(|_| "\"\"".to_string());
+    let password_js = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
+    let _ = webview.eval(format!(
+        "window.__traeAutoRegister && window.__traeAutoRegister.complete({}, {});",
+        code_js, password_js
+    ));
+
+    // 等待 token 拦截（同时监听窗口关闭）
+    println!("[custom-tempmail] 等待登录完成 (token 拦截)...");
+    let (token, url) = tokio::select! {
+        result = token_rx => {
+            match result {
+                Ok(res) => res,
+                Err(_) => {
+                    println!("[custom-tempmail] Token 等待超时或失败");
+                    let _ = webview.close();
+                    return Err(ApiError::from(anyhow::anyhow!("等待 Token 超时或失败")));
+                }
+            }
+        }
+        _ = window_close_rx2 => {
+            return Err(ApiError::from(anyhow::anyhow!("浏览器窗口被关闭，注册取消")));
+        }
+    };
+
+    println!("[custom-tempmail] Token 拦截成功");
+
+    // 获取 cookies
+    let cookies = match wait_for_request_cookies(&webview, &url, Duration::from_secs(6)).await {
+        Ok(cookies) => {
+            println!("[custom-tempmail] 获取到 cookies: {}", &cookies[..cookies.len().min(100)]);
+            Some(cookies)
+        }
+        Err(err) => {
+            println!("[custom-tempmail] 获取 cookies 失败: {}，将继续保存账号", err);
+            None
+        }
+    };
+
+    // 关闭浏览器窗口
+    let _ = webview.close();
+
+    // 保存账号
+    println!("[custom-tempmail] 保存账号...");
+    let mut manager = state.account_manager.lock().await;
+    let mut account = manager.add_account_by_token(token, cookies, Some(password.clone())).await.map_err(ApiError::from)?;
+
+    // 如果邮箱为空或包含*，更新邮箱
+    if account.email.trim().is_empty() || account.email.contains('*') || !account.email.contains('@') {
+        let _ = manager.update_account_email(&account.id, email.clone());
+        account = manager.get_account(&account.id).map_err(ApiError::from)?;
+    }
+
+    println!("\n========================================");
+    println!("[custom-tempmail] 快速注册完成!");
+    println!("[custom-tempmail] 邮箱: {}", account.email);
+    println!("========================================\n");
+
+    Ok(account)
 }
 
 fn build_browser_login_script(port: u16) -> String {
@@ -886,7 +1119,7 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
         browser_login.take().ok_or_else(|| anyhow::anyhow!("浏览器登录未开始"))?
     };
 
-    let (token, url) = tokio::select! {
+    let (token, _url) = tokio::select! {
         res = session.receiver => {
             match res {
                 Ok(token) => token,
@@ -1273,11 +1506,23 @@ async fn export_accounts(state: State<'_, AppState>) -> Result<String> {
     manager.export_accounts().map_err(ApiError::from)
 }
 
+/// 导入账号结果
+#[derive(Debug, serde::Serialize)]
+pub struct ImportAccountsResult {
+    pub count: usize,
+    pub success: Vec<String>,
+    pub failed: Vec<(String, String, String)>, // (邮箱, 密码, 原因)
+}
+
 /// 导入账号
 #[tauri::command]
-async fn import_accounts(data: String, state: State<'_, AppState>) -> Result<usize> {
+async fn import_accounts(
+    data: String,
+    state: State<'_, AppState>
+) -> Result<ImportAccountsResult> {
     let mut manager = state.account_manager.lock().await;
-    manager.import_accounts(&data).await.map_err(ApiError::from)
+    let (count, success, failed) = manager.import_accounts(&data).await.map_err(ApiError::from)?;
+    Ok(ImportAccountsResult { count, success, failed })
 }
 
 /// 获取使用事件
@@ -1344,6 +1589,40 @@ async fn set_trae_machine_id(machine_id: String) -> Result<()> {
 #[tauri::command]
 async fn clear_trae_login_state() -> Result<()> {
     machine::clear_trae_login_state().map_err(ApiError::from)
+}
+
+/// 备份账号的 Trae 上下文数据
+#[tauri::command]
+async fn backup_account_context(account_id: String) -> Result<String> {
+    let backup_path = machine::backup_account_context(&account_id).map_err(ApiError::from)?;
+    Ok(backup_path.to_string_lossy().to_string())
+}
+
+/// 恢复账号的 Trae 上下文数据
+#[tauri::command]
+async fn restore_account_context(account_id: String) -> Result<()> {
+    machine::restore_account_context(&account_id).map_err(ApiError::from)
+}
+
+/// 检查账号是否有上下文备份
+#[tauri::command]
+async fn has_account_context_backup(account_id: String) -> Result<bool> {
+    Ok(machine::has_account_context_backup(&account_id))
+}
+
+/// 删除账号的上下文备份
+#[tauri::command]
+async fn delete_account_context_backup(account_id: String) -> Result<()> {
+    machine::delete_account_context_backup(&account_id).map_err(ApiError::from)
+}
+
+/// 合并两个账号的对话记录（当前账号的对话合并到目标账号）
+#[tauri::command]
+async fn merge_two_accounts_context(
+    current_account_id: String,
+    target_account_id: String,
+) -> Result<()> {
+    machine::merge_two_accounts_context(&current_account_id, &target_account_id).map_err(ApiError::from)
 }
 
 /// 获取保存的 Trae IDE 路径
@@ -1518,6 +1797,486 @@ async fn get_user_statistics(account_id: String, state: State<'_, AppState>) -> 
     manager.get_account_statistics(&account_id).await.map_err(ApiError::from)
 }
 
+/// 检测 Token 无效的账号（只检测，不删除）
+#[tauri::command]
+async fn check_invalid_accounts(state: State<'_, AppState>) -> Result<Vec<(String, String, String)>> {
+    let manager = state.account_manager.lock().await;
+    manager.check_invalid_token_accounts().await.map_err(ApiError::from)
+}
+
+/// 删除指定的账号
+#[tauri::command]
+async fn remove_accounts_by_ids(account_ids: Vec<String>, state: State<'_, AppState>) -> Result<Vec<(String, String)>> {
+    let mut manager = state.account_manager.lock().await;
+    manager.remove_accounts_by_ids(&account_ids).map_err(ApiError::from)
+}
+
+/// 构建注册助手脚本
+fn build_register_helper_script(port: u16) -> String {
+    let script = r#"(function() {
+  if (window.__traeAutoRegister) return;
+
+  const callback = "http://127.0.0.1:__PORT__/callback";
+
+  const sendPayload = (payload) => {
+    const params = new URLSearchParams();
+    Object.keys(payload || {}).forEach((key) => {
+      const value = payload[key];
+      if (value === undefined || value === null || value === "") return;
+      params.append(key, value);
+    });
+    const url = callback + "?" + params.toString();
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(url);
+    } else {
+      fetch(url, { mode: "no-cors" });
+    }
+  };
+
+  const sendLog = (msg) => {
+    sendPayload({ log: msg });
+  };
+
+  const parseToken = (data) => {
+    if (!data) return null;
+    return (
+      data.result?.token ||
+      data.result?.Token ||
+      data.Result?.token ||
+      data.Result?.Token ||
+      data.data?.token ||
+      data.Data?.Token ||
+      data.token ||
+      data.Token ||
+      null
+    );
+  };
+
+  const normalizeUrl = (raw) => {
+    if (!raw) return "";
+    try {
+      return new URL(raw, location.href).toString();
+    } catch {
+      return String(raw);
+    }
+  };
+
+  const sendToken = (token, url) => {
+    if (!token) return;
+    sendLog("Found token: " + token.substring(0, 10) + "...");
+    sendPayload({ token, url: normalizeUrl(url) });
+  };
+
+  const tryFetch = async () => {
+    const endpoints = [
+      "https://api-sg-central.trae.ai/cloudide/api/v3/common/GetUserToken",
+      "https://api-us-east.trae.ai/cloudide/api/v3/common/GetUserToken"
+    ];
+    const headers = {
+      "content-type": "application/json",
+      "accept": "application/json, text/plain, */*",
+      "origin": "https://www.trae.ai",
+      "referer": "https://www.trae.ai/"
+    };
+    for (const endpoint of endpoints) {
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          credentials: "include",
+          headers,
+          body: "{}"
+        });
+        const data = await res.json();
+        const token = parseToken(data);
+        if (token) {
+          sendToken(token, res.url);
+          return;
+        }
+      } catch {}
+    }
+  };
+
+  const hookFetch = () => {
+    const orig = window.fetch;
+    window.fetch = async (...args) => {
+      const url = args[0] instanceof Request ? args[0].url : args[0];
+      if (typeof url === "string" && (url.includes("GetUserToken") || url.includes("cloudide/api/v3"))) {
+          sendLog("Fetch request: " + url);
+      }
+
+      const res = await orig(...args);
+      try {
+        const resUrl = res.url || "";
+        if (resUrl.includes("GetUserToken") || (typeof url === "string" && url.includes("GetUserToken"))) {
+          sendLog("Intercepted GetUserToken response from: " + resUrl);
+          const data = await res.clone().json();
+          const token = parseToken(data);
+          if (token) {
+              sendToken(token, resUrl || url);
+          } else {
+              sendLog("Parsed token is null from data: " + JSON.stringify(data).substring(0, 100));
+          }
+        }
+      } catch (e) {
+          sendLog("Error reading fetch response: " + e.message);
+      }
+      return res;
+    };
+  };
+
+  const hookXHR = () => {
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      this.__trae_url = url;
+      if (typeof url === "string" && (url.includes("GetUserToken") || url.includes("cloudide/api/v3"))) {
+         sendLog("XHR open: " + url);
+      }
+      return origOpen.apply(this, [method, url, ...rest]);
+    };
+    XMLHttpRequest.prototype.send = function(body) {
+      this.addEventListener("load", function() {
+        try {
+          if ((this.__trae_url || "").includes("GetUserToken")) {
+            sendLog("Intercepted GetUserToken XHR load: " + this.__trae_url);
+            const data = JSON.parse(this.responseText);
+            const token = parseToken(data);
+            if (token) {
+                sendToken(token, this.__trae_url);
+            } else {
+                sendLog("Parsed token is null from XHR data");
+            }
+          }
+        } catch (e) {
+             sendLog("Error reading XHR response: " + e.message);
+        }
+      });
+      return origSend.apply(this, arguments);
+    };
+  };
+
+  try {
+      hookFetch();
+      hookXHR();
+      sendLog("Network hooks installed via initialization script");
+  } catch (e) {
+      sendLog("Failed to install hooks: " + e.message);
+  }
+
+  const normalize = (text) => (text || "").toLowerCase();
+
+  const setValue = (input, value) => {
+    if (!input) return false;
+    if (input.value === value) return true;
+
+    const proto = Object.getPrototypeOf(input);
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    input.focus();
+    if (setter) {
+      setter.call(input, value);
+    } else {
+      input.value = value;
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return input.value === value;
+  };
+
+  const findInputByLabel = (labels) => {
+    const labelEls = Array.from(document.querySelectorAll("label"));
+    for (const label of labelEls) {
+      const text = normalize(label.innerText);
+      if (!labels.some((l) => text.includes(l))) continue;
+      const forId = label.getAttribute("for");
+      if (forId) {
+        const target = document.getElementById(forId);
+        if (target) return target;
+      }
+      const nested = label.querySelector("input");
+      if (nested) return nested;
+    }
+    return null;
+  };
+
+  const findInput = (labels, selectors) => {
+    const byLabel = findInputByLabel(labels);
+    if (byLabel) return byLabel;
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el) return el;
+    }
+    return null;
+  };
+
+  const isVisible = (el) => {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const isClickable = (el) => {
+    if (!el || el.disabled) return false;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "button" || tag === "a" || tag === "input") return true;
+    const role = el.getAttribute && el.getAttribute("role");
+    if (role === "button") return true;
+    const style = window.getComputedStyle(el);
+    if (style && style.cursor === "pointer") return true;
+    return !!el.onclick;
+  };
+
+  const findClickableAncestor = (el) => {
+    let current = el;
+    let depth = 0;
+    while (current && depth < 4) {
+      if (isClickable(current)) return current;
+      current = current.parentElement;
+      depth += 1;
+    }
+    return null;
+  };
+
+  const findClickableByText = (labels, scope) => {
+    const root = scope || document;
+    const candidates = Array.from(
+      root.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit'], a, div, span")
+    );
+    return (
+      candidates.find((el) => {
+        if (!isVisible(el)) return false;
+        const text = normalize(el.innerText || el.textContent);
+        if (!text) return false;
+        if (!labels.some((label) => text.includes(label))) return false;
+        return isClickable(el);
+      }) || null
+    );
+  };
+
+  const runWithRetry = (fn, maxTries = 60) => {
+    let tries = 0;
+    let lastSuccessTime = Date.now();
+    const startTime = Date.now();
+
+    const tryExecute = () => {
+      tries += 1;
+      const ok = fn();
+
+      if (ok) {
+        lastSuccessTime = Date.now();
+        clearInterval(timer);
+        return;
+      }
+
+      if (Date.now() - startTime > 30000) {
+        console.log('[AutoRegister] 重试超时，结束执行');
+        clearInterval(timer);
+        return;
+      }
+
+      if (tries >= maxTries) {
+        clearInterval(timer);
+      }
+    };
+
+    tryExecute();
+
+    let interval = 100;
+    const timer = setInterval(() => {
+      if (tries > 10) interval = 200;
+      tryExecute();
+    }, interval);
+  };
+
+  const findTextNodeElement = (labels) => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!node.nodeValue) continue;
+      const text = normalize(node.nodeValue);
+      if (!text) continue;
+      if (labels.some((label) => text.includes(label))) {
+        return node.parentElement;
+      }
+    }
+    return null;
+  };
+
+  const clickByText = (labels) => {
+    const element = findTextNodeElement(labels);
+    if (!element) return false;
+    const clickable = findClickableAncestor(element) || element;
+    clickable.click();
+    return true;
+  };
+
+  const tryAcceptCookies = () => {
+    const cookieSelectors = [
+      'button.cm__btn',
+      '.cm__btn[role="button"]',
+      '.cm__btn'
+    ];
+    for (const selector of cookieSelectors) {
+      const btn = document.querySelector(selector);
+      if (btn && isVisible(btn)) {
+        btn.click();
+        return true;
+      }
+    }
+    const btn = findClickableByText(["got it", "accept", "agree", "允许", "同意"], document);
+    if (btn) {
+      btn.click();
+      return true;
+    }
+    const wrapper = document.querySelector(".cm-wrapper, .cc__wrapper, .cookie-banner, .cookie-consent");
+    if (wrapper) {
+      wrapper.remove();
+      return true;
+    }
+    return false;
+  };
+
+  const tryStart = (email) => {
+    tryAcceptCookies();
+    const emailInput = findInput(["email"], [
+      'input[type="email"]',
+      'input[name="email"]',
+      'input[autocomplete="email"]',
+      'input[placeholder*="Email"]'
+    ]);
+    if (emailInput) {
+      setValue(emailInput, email);
+      if (emailInput.value !== email) {
+        return false;
+      }
+    }
+    const codeInput = findInput(["verification", "code", "验证码", "验证"], [
+      'input[name="code"]',
+      'input[placeholder*="Verification"]',
+      'input[placeholder*="Code"]'
+    ]);
+    const labels = ["send code", "send verification", "get code", "发送验证码", "获取验证码", "发送码"];
+    const sendCodeSelectors = [
+      ".right-part.send-code",
+      ".send-code",
+      ".verification-code",
+      ".verification-code .send-code",
+      ".input-con .right-part"
+    ];
+    const scope = codeInput ? codeInput.parentElement || codeInput.closest("div") : null;
+    let btn = null;
+    for (const selector of sendCodeSelectors) {
+      const candidate = document.querySelector(selector);
+      if (candidate && isVisible(candidate)) {
+        btn = findClickableAncestor(candidate) || candidate;
+        break;
+      }
+    }
+    if (!btn) {
+      btn = findClickableByText(labels, scope);
+    }
+    if (!btn) {
+      btn = findClickableByText(labels, document);
+    }
+    if (!btn) {
+      if (clickByText(labels)) return true;
+    }
+    if (btn) {
+      btn.click();
+      return true;
+    }
+    return false;
+  };
+
+  const tryComplete = (code, password) => {
+    tryAcceptCookies();
+    const codeInput = findInput(["verification", "code"], [
+      'input[name="code"]',
+      'input[placeholder*="Verification"]',
+      'input[placeholder*="Code"]'
+    ]);
+    const passInput = findInput(["password"], [
+      'input[type="password"]',
+      'input[name="password"]',
+      'input[autocomplete="new-password"]'
+    ]);
+    if (codeInput) setValue(codeInput, code);
+    if (passInput) setValue(passInput, password);
+    const form = passInput?.closest("form") || codeInput?.closest("form");
+    if (form) {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      if (typeof form.submit === "function") {
+        form.submit();
+      }
+    }
+    const signUpSelectors = [".btn-submit", ".trae__btn", ".btn-large", ".btn-submit.trae__btn"];
+    let btn = null;
+    for (const selector of signUpSelectors) {
+      const candidate = document.querySelector(selector);
+      if (candidate && isVisible(candidate)) {
+        btn = findClickableAncestor(candidate) || candidate;
+        break;
+      }
+    }
+    if (!btn) {
+      btn = findClickableByText(["sign up", "register", "注册"], document);
+    }
+    if (btn) {
+      btn.click();
+      return true;
+    }
+    return false;
+  };
+
+  window.__traeAutoRegister = {
+    start: (email) => runWithRetry(() => tryStart(email)),
+    complete: (code, password) => runWithRetry(() => tryComplete(code, password))
+  };
+
+  hookFetch();
+  hookXHR();
+  tryFetch();
+  setInterval(tryFetch, 3000);
+
+  sendLog("AutoRegister helper installed");
+})();
+"#;
+
+    script.replace("__PORT__", &port.to_string())
+}
+
+/// 等待请求 cookies
+async fn wait_for_request_cookies(
+    webview: &tauri::webview::WebviewWindow,
+    request_url: &str,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let parsed_url = normalize_request_url(request_url)
+        .ok_or_else(|| anyhow::anyhow!("URL 无效: {}", request_url))?;
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(cookie_list) = webview.cookies_for_url(parsed_url.clone()) {
+            let cookies = cookie_list
+                .into_iter()
+                .map(|c| format!("{}={}", c.name(), c.value()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !cookies.is_empty() {
+                return Ok(cookies);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    Err(anyhow::anyhow!("未能获取 Cookie"))
+}
+
+fn normalize_request_url(url: &str) -> Option<Url> {
+    let trimmed = url.split('?').next().unwrap_or(url);
+    Url::parse("https://www.trae.ai/")
+        .ok()?
+        .join(trimmed)
+        .ok()
+}
+
 async fn handle_silent_start() -> anyhow::Result<()> {
     let mut manager = AccountManager::new()?;
     
@@ -1645,6 +2404,11 @@ pub fn run() {
             get_trae_machine_id,
             set_trae_machine_id,
             clear_trae_login_state,
+            backup_account_context,
+            restore_account_context,
+            has_account_context_backup,
+            delete_account_context_backup,
+            merge_two_accounts_context,
             get_trae_path,
             set_trae_path,
             scan_trae_path,
@@ -1656,6 +2420,8 @@ pub fn run() {
             export_logs_cmd,
             clear_logs_cmd,
             get_log_file_path_cmd,
+            check_invalid_accounts,
+            remove_accounts_by_ids,
             quick_register_backend::quick_register_create_task,
             quick_register_backend::quick_register_get_status,
             quick_register_backend::quick_register_claim_resource,

@@ -127,7 +127,13 @@ export function Settings({
       await loadTraeMachineId(); // 重新加载新的机器码
       onToast?.("success", "Trae IDE 登录状态已清除，请手动删除 .trae 文件夹后重启电脑");
     } catch (err: any) {
-      onToast?.("error", err.message || "清除失败");
+      const errorMsg = err.message || "清除失败";
+      // 检查是否是权限错误
+      if (errorMsg.includes("拒绝访问") || errorMsg.includes("Permission") || errorMsg.includes("Access is denied")) {
+        onToast?.("error", "清除失败：权限不足，请右键以管理员身份运行本软件后重试");
+      } else {
+        onToast?.("error", errorMsg);
+      }
     } finally {
       setClearingTrae(false);
     }

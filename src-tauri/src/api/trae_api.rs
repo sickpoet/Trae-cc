@@ -512,7 +512,7 @@ impl TraeApiClient {
 
         for base in endpoints.iter() {
             let url = format!("{}/trae/api/v1/pay/user_current_entitlement_list", base);
-            println!("[TraeApiClient] 尝试获取额度信息: {}", base);
+            // println!("[TraeApiClient] 尝试获取额度信息: {}", base);
 
             let response = self
                 .client
@@ -525,7 +525,7 @@ impl TraeApiClient {
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let response_text = resp.text().await?;
-                    println!("[TraeApiClient] 端点 {} 响应长度: {}", base, response_text.len());
+                    // println!("[TraeApiClient] 端点 {} 响应长度: {}", base, response_text.len());
 
                     if !response_text.contains("user_entitlement_pack_list") {
                         println!("[TraeApiClient] 端点 {} 响应不包含 user_entitlement_pack_list", base);
@@ -535,7 +535,7 @@ impl TraeApiClient {
 
                     match serde_json::from_str::<EntitlementListResponse>(&response_text) {
                         Ok(entitlements) => {
-                            println!("[TraeApiClient] ✅ 成功获取额度信息: {}", base);
+                            // println!("[TraeApiClient] ✅ 成功获取额度信息: {}", base);
                             return Self::parse_entitlements_to_summary(entitlements);
                         }
                         Err(e) => {
