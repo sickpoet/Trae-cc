@@ -357,6 +357,7 @@ function App() {
         is_current: false,
         usage: null,
         password: account.password ?? null,
+        user_id: account.user_id ?? null,
       };
       
       setAccounts((prev) => {
@@ -465,7 +466,7 @@ function App() {
   // 切换账号 / 重新登录（同逻辑）
   const handleSwitchAccount = async (
     accountId: string,
-    options?: { mode?: "switch" | "relogin"; force?: boolean; mergeContext?: boolean }
+    options?: { mode?: "switch" | "relogin"; force?: boolean }
   ) => {
     const account = accounts.find((a) => a.id === accountId);
     if (!account) return;
@@ -479,12 +480,11 @@ function App() {
 
     const mode = options?.mode ?? "switch";
     const force = options?.force ?? mode === "relogin";
-    const mergeContext = options?.mergeContext ?? false;
     const title = mode === "relogin" ? "重新登录" : "切换账号";
     const message =
       mode === "relogin"
         ? `确定要重新登录账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并重新写入登录信息。`
-        : `确定要切换到账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并切换登录信息。${mergeContext ? "\n\n【对话互通模式】将合并所有账号的聊天记录。" : ""}`;
+        : `确定要切换到账号 "${account.email || account.name}" 吗？\n\n系统将自动关闭 Trae IDE 并切换登录信息。`;
     const infoToast = mode === "relogin" ? "正在重新登录，请稍候..." : "正在切换账号，请稍候...";
     const successToast = mode === "relogin" ? "账号重新登录完成" : "账号切换成功";
     const errorToast = mode === "relogin" ? "重新登录失败" : "切换账号失败";
@@ -504,7 +504,6 @@ function App() {
           console.log(`[SwitchAccount] ========== 开始切换账号 ==========`);
           console.log(`[SwitchAccount] 当前活跃账号:`, currentAccount?.id, currentAccount?.email);
           console.log(`[SwitchAccount] 目标账号:`, accountId, targetAccount?.email);
-          console.log(`[SwitchAccount] mergeContext:`, mergeContext);
           
           // 2. 如果有当前活跃账号，先备份其上下文
           if (currentAccount && currentAccount.id !== accountId) {
@@ -524,28 +523,12 @@ function App() {
             console.log(`[SwitchAccount] 无需备份: currentAccount=${currentAccount?.id}, sameAccount=${currentAccount?.id === accountId}`);
           }
           
-          // 3. 如果启用了对话互通模式，先合并当前账号的对话到目标账号的备份
-          console.log(`[SwitchAccount] 检查是否需要合并: mergeContext=${mergeContext}, currentAccount=${currentAccount?.id}, accountId=${accountId}, same=${currentAccount?.id === accountId}`);
-          if (mergeContext && currentAccount && currentAccount.id !== accountId) {
-            console.log(`[SwitchAccount] 启用了对话互通模式，合并当前账号 ${currentAccount.id} 的对话到目标账号 ${accountId}...`);
-            try {
-              addToast("info", `正在合并聊天记录...`, undefined, `merge-context`);
-              await api.mergeTwoAccountsContext(currentAccount.id, accountId);
-              console.log(`[SwitchAccount] 对话合并完成，已合并到目标账号备份`);
-              addToast("success", `已合并聊天记录`);
-            } catch (mergeErr: any) {
-              console.error(`[SwitchAccount] 合并对话失败:`, mergeErr);
-              addToast("warning", `合并聊天记录失败: ${mergeErr.message}`);
-              // 合并失败不阻止切换
-            }
-          }
-          
-          // 4. 执行账号切换
+          // 3. 执行账号切换
           console.log(`[SwitchAccount] 开始执行账号切换...`);
           await api.switchAccount(accountId, { force });
           console.log(`[SwitchAccount] 账号切换完成`);
-          
-          // 5. 恢复新账号的上下文（如果有备份）
+
+          // 4. 恢复新账号的上下文（如果有备份）
           console.log(`[SwitchAccount] 检查新账号 ${accountId} 是否有备份...`);
           try {
             const hasBackup = await api.hasAccountContextBackup(accountId);
@@ -1221,10 +1204,6 @@ function App() {
           }}
           onSwitchAccount={() => {
             handleSwitchAccount(contextMenu.accountId);
-            setContextMenu(null);
-          }}
-          onSwitchAccountWithMerge={() => {
-            handleSwitchAccount(contextMenu.accountId, { mergeContext: true });
             setContextMenu(null);
           }}
           onBuyPro={() => {

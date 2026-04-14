@@ -489,6 +489,8 @@ async fn quick_register_with_custom_tempmail(
         account = manager.get_account(&account.id).map_err(ApiError::from)?;
     }
 
+    println!("[快速注册] 完成! 账号: {}", account.email);
+
     Ok(account)
 }
 

@@ -58,10 +58,9 @@ export default {
       }
 
       // 3. 读取数据库，针对指定邮箱查询，并转换为北京时间
-      // 使用小写比对，防止大小写导致查不到
-      const result = await env.DB.prepare("SELECT content, datetime(created_at, '+8 hours') as local_time FROM messages WHERE address = ? ORDER BY id DESC LIMIT 1")
-        .bind(targetEmail.toLowerCase().trim())
-        .first();
+      // 只查询包含验证码的邮件（content中有6位数字）
+      const query = "SELECT content, datetime(created_at, '+8 hours') as local_time FROM messages WHERE address = ? AND content REGEXP '\\b\\d{6}\\b' ORDER BY id DESC LIMIT 1";
+      const result = await env.DB.prepare(query).bind(targetEmail.toLowerCase().trim()).first();
       
       if (!result) {
         return new Response(JSON.stringify({ error: "该邮箱目前没收到邮件，或者验证码已过期被删除（超过1分钟）" }), {
@@ -96,6 +95,45 @@ export default {
     await env.DB.prepare(\`DELETE FROM messages WHERE created_at < datetime('now', '-1 minute')\`).run();
 
     const raw = await new Response(message.raw).text();
+    const subject = message.headers.get("subject") || "";
+    
+    // 只处理验证码邮件（通过主题关键词过滤）
+    const isVerificationEmail = 
+      subject.toLowerCase().includes('verification') || 
+      subject.toLowerCase().includes('验证码') ||
+      subject.toLowerCase().includes('code') ||
+      raw.includes('Verification Code');
+    
+    if (!isVerificationEmail) {
+      // 非验证码邮件，直接忽略不存储
+      return;
+    }
+    
+    // 提取验证码 - 在原始邮件内容中查找 6 位数字
+    // 优先匹配 HTML 标签中的验证码，如 <span>123456</span>
+    let extractedCode = null;
+    
+    // 方法1: 匹配 HTML 标签中的 6 位数字
+    const htmlCodeMatch = raw.match(/>(\\d{6})</);
+    if (htmlCodeMatch) {
+      extractedCode = htmlCodeMatch[1];
+    }
+    
+    // 方法2: 如果方法1没找到，在邮件正文中查找独立的 6 位数字
+    if (!extractedCode) {
+      const bodyCodeMatch = raw.match(/\\b\\d{6}\\b/);
+      if (bodyCodeMatch) {
+        extractedCode = bodyCodeMatch[0];
+      }
+    }
+    
+    // 如果没找到验证码，打印邮件HTML内容以便调试
+    if (!extractedCode) {
+      console.log("未找到验证码，邮件HTML内容:");
+      console.log(raw);
+      return;
+    }
+    
     // 改进的提取逻辑：找到第一个空行后的内容
     const parts = raw.split(/\\r?\\n\\r?\\n/);
     let body = parts.length > 1 ? parts.slice(1).join('\\n\\n') : raw;
@@ -105,6 +143,9 @@ export default {
                .replace(/&nbsp;/g, ' ')
                .replace(/=\\r?\\n/g, '')  // 处理 Quoted-Printable 换行
                .trim();
+    
+    // 把验证码加到 body 开头，确保能被查询到
+    body = extractedCode + ' ' + body;
 
     // 格式化目标邮箱名称（统一转为小写）
     const toAddress = (message.to || "").toLowerCase().trim();
@@ -113,7 +154,7 @@ export default {
       // 存入当前这封新邮件（每个邮箱的数据都单独存放）
       await env.DB.prepare(
         "INSERT INTO messages (address, source, subject, content) VALUES (?, ?, ?, ?)"
-      ).bind(toAddress, message.from, message.headers.get("subject") || "无主题", body).run();
+      ).bind(toAddress, message.from, subject, body).run();
     } catch (e) {
       console.error("存入失败:", e.message);
     }

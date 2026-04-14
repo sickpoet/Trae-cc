@@ -216,7 +216,8 @@ export function QuickRegisterModal({
 
     try {
       // 轮询等待验证完成，返回最终状态
-      const finalStatus = await api.pollTaskVerification(ticketToUse, 600000, 3000);
+      const pollResult = api.pollTaskVerification(ticketToUse, 600000, 3000);
+      const finalStatus = await pollResult.promise;
       console.log("轮询结束，最终状态:", finalStatus);
 
       // 验证成功，开始领取资源
