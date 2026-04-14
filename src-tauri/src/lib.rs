@@ -290,10 +290,6 @@ async fn quick_register_with_custom_tempmail(
     use tokio::sync::oneshot;
     use warp::Filter;
 
-    println!("\n========================================");
-    println!("[custom-tempmail] 开始快速注册流程");
-    println!("========================================\n");
-
     // 检查是否已有浏览器登录在进行中
     if state.browser_login.lock().await.is_some() {
         return Err(ApiError::from(anyhow::anyhow!("浏览器登录正在进行中，请稍后再试")));
@@ -313,15 +309,12 @@ async fn quick_register_with_custom_tempmail(
     }
 
     // 初始化临时邮箱客户端
-    println!("[custom-tempmail] 初始化临时邮箱客户端...");
-    println!("[custom-tempmail] API URL: {}", config.api_url);
+    println!("[快速注册] 生成临时邮箱...");
     let mut mail_client = CustomTempMailClient::new(config);
 
     let password = generate_password();
     let email = mail_client.generate_email();
-
-    println!("[custom-tempmail] 邮箱: {}", email);
-    println!("[custom-tempmail] 密码: {}******", &password[..3]);
+    println!("[快速注册] 邮箱: {}", email);
 
     // 启动本地回调服务器（用于接收 JS 拦截的 Token）
     let (token_tx, token_rx) = oneshot::channel::<(String, String)>();
@@ -339,16 +332,10 @@ async fn quick_register_with_custom_tempmail(
     let route = warp::path("callback")
         .and(warp::query::<HashMap<String, String>>())
         .map(move |query: HashMap<String, String>| {
-            if let Some(msg) = query.get("log") {
-                println!("[custom-tempmail-js] {}", msg);
-                return warp::reply::html("ok".to_string());
-            }
-
             let token = query.get("token").cloned().unwrap_or_default();
             let url = query.get("url").cloned().unwrap_or_default();
 
             if !token.is_empty() {
-                println!("[custom-tempmail] 收到Token回调");
                 if let Some(tx) = token_sender_route.lock().unwrap().take() {
                     let _ = tx.send((token, url));
                 }
@@ -368,7 +355,6 @@ async fn quick_register_with_custom_tempmail(
     tokio::spawn(server);
 
     let port = addr.port();
-    println!("[custom-tempmail] 回调服务器启动在端口: {}", port);
 
     // 准备注册助手脚本
     let pending_completion: Arc<StdMutex<Option<(String, String)>>> = Arc::new(StdMutex::new(None));
@@ -384,7 +370,6 @@ async fn quick_register_with_custom_tempmail(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    println!("[custom-tempmail] 创建浏览器窗口...");
     let webview = WebviewWindowBuilder::new(&app, "trae-register", WebviewUrl::External("about:blank".parse().unwrap()))
         .title("Trae 注册")
         .inner_size(1000.0, 720.0)
@@ -440,12 +425,12 @@ async fn quick_register_with_custom_tempmail(
     ));
 
     // 等待验证码邮件（同时监听窗口关闭）
-    println!("[custom-tempmail] 等待验证码邮件...");
+    println!("[快速注册] 等待验证码...");
     let code = tokio::select! {
         result = mail_client.wait_for_code(120) => {
             match result {
                 Ok(code) => {
-                    println!("[custom-tempmail] 获取验证码: {}", code);
+                    println!("[快速注册] 获取验证码: {}", code);
                     code
                 }
                 Err(err) => {
@@ -469,13 +454,12 @@ async fn quick_register_with_custom_tempmail(
     ));
 
     // 等待 token 拦截（同时监听窗口关闭）
-    println!("[custom-tempmail] 等待登录完成 (token 拦截)...");
+    println!("[快速注册] 等待登录完成...");
     let (token, url) = tokio::select! {
         result = token_rx => {
             match result {
                 Ok(res) => res,
                 Err(_) => {
-                    println!("[custom-tempmail] Token 等待超时或失败");
                     let _ = webview.close();
                     return Err(ApiError::from(anyhow::anyhow!("等待 Token 超时或失败")));
                 }
@@ -486,25 +470,16 @@ async fn quick_register_with_custom_tempmail(
         }
     };
 
-    println!("[custom-tempmail] Token 拦截成功");
+    println!("[快速注册] 登录成功，保存账号...");
 
     // 获取 cookies
     let cookies = match wait_for_request_cookies(&webview, &url, Duration::from_secs(6)).await {
-        Ok(cookies) => {
-            println!("[custom-tempmail] 获取到 cookies: {}", &cookies[..cookies.len().min(100)]);
-            Some(cookies)
-        }
-        Err(err) => {
-            println!("[custom-tempmail] 获取 cookies 失败: {}，将继续保存账号", err);
-            None
-        }
+        Ok(cookies) => Some(cookies),
+        Err(_) => None,
     };
 
     // 关闭浏览器窗口
     let _ = webview.close();
-
-    // 保存账号
-    println!("[custom-tempmail] 保存账号...");
     let mut manager = state.account_manager.lock().await;
     let mut account = manager.add_account_by_token(token, cookies, Some(password.clone())).await.map_err(ApiError::from)?;
 
@@ -513,11 +488,6 @@ async fn quick_register_with_custom_tempmail(
         let _ = manager.update_account_email(&account.id, email.clone());
         account = manager.get_account(&account.id).map_err(ApiError::from)?;
     }
-
-    println!("\n========================================");
-    println!("[custom-tempmail] 快速注册完成!");
-    println!("[custom-tempmail] 邮箱: {}", account.email);
-    println!("========================================\n");
 
     Ok(account)
 }
@@ -1900,26 +1870,17 @@ fn build_register_helper_script(port: u16) -> String {
     const orig = window.fetch;
     window.fetch = async (...args) => {
       const url = args[0] instanceof Request ? args[0].url : args[0];
-      if (typeof url === "string" && (url.includes("GetUserToken") || url.includes("cloudide/api/v3"))) {
-          sendLog("Fetch request: " + url);
-      }
-
       const res = await orig(...args);
       try {
         const resUrl = res.url || "";
         if (resUrl.includes("GetUserToken") || (typeof url === "string" && url.includes("GetUserToken"))) {
-          sendLog("Intercepted GetUserToken response from: " + resUrl);
           const data = await res.clone().json();
           const token = parseToken(data);
           if (token) {
               sendToken(token, resUrl || url);
-          } else {
-              sendLog("Parsed token is null from data: " + JSON.stringify(data).substring(0, 100));
           }
         }
-      } catch (e) {
-          sendLog("Error reading fetch response: " + e.message);
-      }
+      } catch (e) {}
       return res;
     };
   };
@@ -1929,27 +1890,19 @@ fn build_register_helper_script(port: u16) -> String {
     const origSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url, ...rest) {
       this.__trae_url = url;
-      if (typeof url === "string" && (url.includes("GetUserToken") || url.includes("cloudide/api/v3"))) {
-         sendLog("XHR open: " + url);
-      }
       return origOpen.apply(this, [method, url, ...rest]);
     };
     XMLHttpRequest.prototype.send = function(body) {
       this.addEventListener("load", function() {
         try {
           if ((this.__trae_url || "").includes("GetUserToken")) {
-            sendLog("Intercepted GetUserToken XHR load: " + this.__trae_url);
             const data = JSON.parse(this.responseText);
             const token = parseToken(data);
             if (token) {
                 sendToken(token, this.__trae_url);
-            } else {
-                sendLog("Parsed token is null from XHR data");
             }
           }
-        } catch (e) {
-             sendLog("Error reading XHR response: " + e.message);
-        }
+        } catch (e) {}
       });
       return origSend.apply(this, arguments);
     };
@@ -1958,10 +1911,7 @@ fn build_register_helper_script(port: u16) -> String {
   try {
       hookFetch();
       hookXHR();
-      sendLog("Network hooks installed via initialization script");
-  } catch (e) {
-      sendLog("Failed to install hooks: " + e.message);
-  }
+  } catch (e) {}
 
   const normalize = (text) => (text || "").toLowerCase();
 

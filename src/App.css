@@ -6100,7 +6100,7 @@ body {
   border-radius: 12px;
   padding: 12px;
   box-shadow: var(--shadow);
-  margin-bottom: 16px;
+  margin: 0 auto 16px;
 }
 
 .qrcode-image {
@@ -6689,4 +6689,25 @@ body {
   padding: 10px 12px;
   border-radius: 6px;
   margin-top: 10px;
+}
+
+/* 邀请码相关动画 */
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translateY(-10px) scale(1.2);
+    opacity: 0.8;
+  }
+}
+
+@keyframes shake {
+  0%, 100% {
+    transform: rotate(-3deg);
+  }
+  50% {
+    transform: rotate(3deg);
+  }
 }

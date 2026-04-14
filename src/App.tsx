@@ -500,8 +500,11 @@ function App() {
         try {
           // 1. 获取当前活跃账号（用于备份）
           const currentAccount = accounts.find(a => a.is_active);
+          const targetAccount = accounts.find(a => a.id === accountId);
+          console.log(`[SwitchAccount] ========== 开始切换账号 ==========`);
           console.log(`[SwitchAccount] 当前活跃账号:`, currentAccount?.id, currentAccount?.email);
-          console.log(`[SwitchAccount] 目标账号ID:`, accountId);
+          console.log(`[SwitchAccount] 目标账号:`, accountId, targetAccount?.email);
+          console.log(`[SwitchAccount] mergeContext:`, mergeContext);
           
           // 2. 如果有当前活跃账号，先备份其上下文
           if (currentAccount && currentAccount.id !== accountId) {
@@ -522,6 +525,7 @@ function App() {
           }
           
           // 3. 如果启用了对话互通模式，先合并当前账号的对话到目标账号的备份
+          console.log(`[SwitchAccount] 检查是否需要合并: mergeContext=${mergeContext}, currentAccount=${currentAccount?.id}, accountId=${accountId}, same=${currentAccount?.id === accountId}`);
           if (mergeContext && currentAccount && currentAccount.id !== accountId) {
             console.log(`[SwitchAccount] 启用了对话互通模式，合并当前账号 ${currentAccount.id} 的对话到目标账号 ${accountId}...`);
             try {

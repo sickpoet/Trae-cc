@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import * as api from "../api";
 import type { Account, AppSettings } from "../types";
+import { WorkerSetupGuide } from "./WorkerSetupGuide";
 
 interface AddAccountModalProps {
   isOpen: boolean;
@@ -58,6 +59,9 @@ export function AddAccountModal({
   const [error, setError] = useState("");
   const dropdownRef = useRef<HTMLDivElement>(null);
   
+  // Worker 配置教程弹窗状态
+  const [showWorkerGuide, setShowWorkerGuide] = useState(false);
+  
   // 浏览器登录表单状态
   const [loginProgress, setLoginProgress] = useState(0);
   const [loginStatus, setLoginStatus] = useState("");
@@ -79,12 +83,26 @@ export function AddAccountModal({
   const [availableCount, setAvailableCount] = useState<number | null>(null);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  
+  // ===== 邀请码相关状态 =====
+  const [inviteCode, setInviteCode] = useState("");
+  const [claimMessage, setClaimMessage] = useState("");
+  const [myInviteCode, setMyInviteCode] = useState("");
+  const [isCriticalHit, setIsCriticalHit] = useState(false);
+  
+  // ===== 轮询取消函数 =====
+  const cancelPollingRef = useRef<(() => void) | null>(null);
 
-  // 清理进度定时器
+  // 清理进度定时器和轮询
   useEffect(() => {
     return () => {
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
+      }
+      // 组件卸载时取消轮询
+      if (cancelPollingRef.current) {
+        cancelPollingRef.current();
+        cancelPollingRef.current = null;
       }
     };
   }, []);
@@ -168,6 +186,10 @@ export function AddAccountModal({
     setAddedAccounts([]);
     setManualAccounts([]);
     setIsQrLoading(false);
+    setInviteCode("");
+    setClaimMessage("");
+    setMyInviteCode("");
+    setIsCriticalHit(false);
   };
 
   const handleReadTraeAccount = async () => {
@@ -304,23 +326,59 @@ export function AddAccountModal({
 
     setQrStep("waiting");
 
+    // 10秒后自动取消轮询
+    const autoCancelTimeout = setTimeout(() => {
+      if (cancelPollingRef.current) {
+        cancelPollingRef.current();
+        cancelPollingRef.current = null;
+        setQrStep("qrcode");
+        onToast?.("warning", "验证超时，请完成后点击");
+      }
+    }, 10000); // 10秒
+
     try {
-      const finalStatus = await api.pollTaskVerification(ticketToUse, 600000, 3000);
+      // 使用新的轮询 API，支持取消
+      const { promise, cancel } = api.pollTaskVerification(ticketToUse, 600000, 3000);
+      cancelPollingRef.current = cancel;
+
+      const finalStatus = await promise;
+
+      // 轮询成功，清除取消函数和自动取消定时器
+      clearTimeout(autoCancelTimeout);
+      cancelPollingRef.current = null;
 
       setQrStep("claiming");
       onToast?.("success", "验证成功，正在获取账号...");
 
       let accountsData: { account: string; password: string }[] = [];
+      let responseMessage = "";
 
       if (finalStatus.status === "claimed" && finalStatus.resource_payload) {
         accountsData = finalStatus.resource_payload;
       } else {
-        const resourceResponse = await api.claimResource(ticketToUse);
+        // 传递邀请码领取资源
+        const resourceResponse = await api.claimResource(ticketToUse, inviteCode || undefined);
         if (!resourceResponse.success) {
           throw new Error(resourceResponse.message || "领取资源失败");
         }
         if (resourceResponse.resource_payload) {
           accountsData = resourceResponse.resource_payload;
+        }
+        // 保存后端返回的 message
+        responseMessage = resourceResponse.message || "";
+        setClaimMessage(responseMessage);
+        
+        // 判断是否暴击（账号数量 > 1）
+        const isCrit = accountsData.length > 1;
+        setIsCriticalHit(isCrit);
+        
+        // 从 message 中提取用户的专属邀请码
+        const inviteCodeMatch = responseMessage.match(/您的专属邀请码[：:]\s*([A-Z0-9]+)/i);
+        if (inviteCodeMatch) {
+          const extractedCode = inviteCodeMatch[1].toUpperCase();
+          setMyInviteCode(extractedCode);
+          // 保存到 localStorage
+          localStorage.setItem('my_invite_code', extractedCode);
         }
       }
 
@@ -355,9 +413,23 @@ export function AddAccountModal({
         onToast?.("warning", "自动导入失败，请手动复制账号密码登录");
       }
     } catch (err: any) {
+      // 用户取消不显示错误
+      if (err.message === "用户已取消") {
+        return;
+      }
       setQrError(err.message || "验证失败");
       setQrStep("error");
     }
+  };
+
+  // 取消轮询
+  const handleCancelPolling = () => {
+    if (cancelPollingRef.current) {
+      cancelPollingRef.current();
+      cancelPollingRef.current = null;
+    }
+    setQrStep("qrcode");
+    onToast?.("info", "已取消验证");
   };
 
   const handleQrRetry = () => {
@@ -630,8 +702,13 @@ export function AddAccountModal({
                   </svg>
                 </div>
                 <span className="config-title">Cloudflare Worker 配置</span>
-                <span className={`config-badge ${isConfigComplete ? 'configured' : 'unconfigured'}`}>
-                  {isConfigComplete ? '已配置' : '未配置'}
+                <span 
+                  className={`config-badge ${isConfigComplete ? 'configured' : 'unconfigured'}`}
+                  onClick={() => !isConfigComplete && setShowWorkerGuide(true)}
+                  style={{ cursor: isConfigComplete ? 'default' : 'pointer' }}
+                  title={isConfigComplete ? '已配置' : '点击查看配置教程'}
+                >
+                  {isConfigComplete ? '已配置' : '去配置'}
                 </span>
               </div>
               
@@ -640,20 +717,28 @@ export function AddAccountModal({
                 <input
                   type="text"
                   value={settings?.custom_tempmail_config?.api_url || ''}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    let url = e.target.value.trim();
+                    // 自动添加 https:// 前缀（如果不存在）
+                    if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+                      url = 'https://' + url;
+                    }
                     handleUpdateSettings({
                       ...(settings || {} as AppSettings),
                       custom_tempmail_config: {
-                        api_url: e.target.value,
+                        api_url: url,
                         secret_key: settings?.custom_tempmail_config?.secret_key || '',
                         email_domain: settings?.custom_tempmail_config?.email_domain || '',
                       },
-                    })
-                  }
+                    });
+                  }}
                   disabled={loading}
-                  placeholder="https://your-worker.your-subdomain.workers.dev"
+                  placeholder="your-worker.your-subdomain.workers.dev 或 https://..."
                   className="config-input"
                 />
+                <small style={{ color: '#888', fontSize: '11px', marginTop: '4px', display: 'block' }}>
+                  支持自动补全 https://，只需输入域名即可
+                </small>
               </div>
 
               <div className="config-field">
@@ -796,24 +881,50 @@ export function AddAccountModal({
             {/* 展示二维码步骤 */}
             {qrStep === "qrcode" && (
               <div className="step-content">
-                <div className="qrcode-section">
-                  <div className="qrcode-container">
-                    {qrcodeUrl ? (
-                      <img src={qrcodeUrl} alt="微信扫码" className="qrcode-image" />
-                    ) : (
-                      <div className="qrcode-placeholder">加载中...</div>
-                    )}
-                  </div>
-                  <div className="qrcode-info">
-                    <p className="qrcode-tip">
-                      请使用微信扫描二维码
-                      <br />
-                      观看视频广告后自动验证
-                    </p>
-                    <div className="countdown">
-                      有效期: <span>{formatCountdown(countdown)}</span>
-                    </div>
-                  </div>
+                {/* 有效期 */}
+                <div style={{ textAlign: 'center', marginBottom: '16px' }}>
+                  <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                    有效期: <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{formatCountdown(countdown)}</span>
+                  </span>
+                </div>
+
+                {/* 二维码 */}
+                <div className="qrcode-container" style={{ marginBottom: '20px', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                  {qrcodeUrl ? (
+                    <img src={qrcodeUrl} alt="微信扫码" className="qrcode-image" />
+                  ) : (
+                    <div className="qrcode-placeholder">加载中...</div>
+                  )}
+                </div>
+
+                {/* 邀请码输入 */}
+                <div style={{ marginBottom: '20px' }}>
+                  <input
+                    type="text"
+                    value={inviteCode}
+                    onChange={(e) => setInviteCode(e.target.value.toUpperCase().trim())}
+                    placeholder="邀请码（选填）"
+                    maxLength={6}
+                    style={{
+                      width: '100%',
+                      height: '38px',
+                      padding: '0 14px',
+                      fontSize: '14px',
+                      fontWeight: 500,
+                      textAlign: 'center',
+                      letterSpacing: '3px',
+                      border: '1px solid var(--border)',
+                      borderRadius: '6px',
+                      background: 'var(--bg-input)',
+                      color: 'var(--text-primary)',
+                      outline: 'none'
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = 'var(--accent)'}
+                    onBlur={(e) => e.target.style.borderColor = 'var(--border)'}
+                  />
+                  <p style={{ fontSize: '11px', color: 'var(--accent)', marginTop: '6px', textAlign: 'center' }}>
+                    输入邀请码，首领账号直接暴击 5 倍！
+                  </p>
                 </div>
 
                 <div className="modal-actions">
@@ -843,6 +954,12 @@ export function AddAccountModal({
                     剩余时间: <span>{formatCountdown(countdown)}</span>
                   </div>
                 </div>
+                
+                <div className="modal-actions" style={{ marginTop: '20px' }}>
+                  <button type="button" onClick={handleCancelPolling}>
+                    请查看完成后点击
+                  </button>
+                </div>
               </div>
             )}
 
@@ -860,14 +977,87 @@ export function AddAccountModal({
             {/* 成功步骤 */}
             {qrStep === "success" && (
               <div className="step-content">
-                <div className="success-section">
+                <div className="success-section" style={{ position: 'relative' }}>
+                  {/* 暴击特效 */}
+                  {isCriticalHit && (
+                    <div style={{ position: 'absolute', top: '-20px', left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: '16px', pointerEvents: 'none' }}>
+                      <span style={{ fontSize: '20px', animation: 'bounce 1s ease-in-out infinite' }}>🎆</span>
+                      <span style={{ fontSize: '20px', animation: 'bounce 1s ease-in-out infinite 0.2s' }}>✨</span>
+                      <span style={{ fontSize: '20px', animation: 'bounce 1s ease-in-out infinite 0.4s' }}>🎉</span>
+                    </div>
+                  )}
+                  
                   <div className="success-icon">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" width="32" height="32">
                       <polyline points="20 6 9 17 4 12"/>
                     </svg>
                   </div>
-                  <h3>导入成功!</h3>
+                  <h3>{isCriticalHit ? '恭喜暴击！' : '导入成功!'}</h3>
                   <p>已成功导入 {addedAccounts.length} 个账号</p>
+                  
+                  {/* 后端返回的 message */}
+                  {claimMessage && (
+                    <div style={{ 
+                      background: 'var(--bg-card)', 
+                      borderRadius: '8px', 
+                      padding: '12px', 
+                      margin: '12px 0', 
+                      border: '1px solid var(--border)',
+                      textAlign: 'left'
+                    }}>
+                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                        </svg>
+                        领取提示
+                      </div>
+                      <pre style={{ fontSize: '12px', color: 'var(--text-primary)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, fontFamily: 'inherit' }}>
+                        {claimMessage}
+                      </pre>
+                    </div>
+                  )}
+                  
+                  {/* 我的专属邀请码 */}
+                  {myInviteCode && (
+                    <div style={{ 
+                      background: 'var(--bg-secondary)', 
+                      borderRadius: '8px', 
+                      padding: '12px', 
+                      margin: '12px 0',
+                      textAlign: 'center',
+                      border: '1px solid var(--border)'
+                    }}>
+                      <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>我的专属邀请码</div>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                        <span style={{ 
+                          fontSize: '20px', 
+                          fontWeight: 700, 
+                          color: '#F97316', 
+                          letterSpacing: '3px',
+                          background: 'var(--bg-input)',
+                          padding: '6px 12px',
+                          borderRadius: '6px',
+                          border: '1px solid var(--border)'
+                        }}>
+                          {myInviteCode}
+                        </span>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(myInviteCode);
+                            onToast?.("success", "邀请码已复制");
+                          }}
+                          className="copy-btn"
+                          style={{ padding: '6px 12px', fontSize: '12px' }}
+                        >
+                          复制
+                        </button>
+                      </div>
+                      <p style={{ fontSize: '11px', color: '#F97316', marginTop: '6px' }}>
+                        分享给好友，双方均可获得 5 倍暴击奖励！
+                      </p>
+                    </div>
+                  )}
+                  
                   <div className="imported-accounts">
                     {addedAccounts.map((account, index) => (
                       <div key={account.id} className="imported-account-item">
@@ -1004,6 +1194,12 @@ export function AddAccountModal({
           </div>
         )}
       </div>
+      
+      {/* Worker 配置教程弹窗 */}
+      <WorkerSetupGuide 
+        isOpen={showWorkerGuide} 
+        onClose={() => setShowWorkerGuide(false)} 
+      />
     </div>
   );
 }

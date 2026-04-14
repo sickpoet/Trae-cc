@@ -49,8 +49,10 @@ pub struct CustomTempMailClient {
 /// 验证码查询响应
 #[derive(Debug, Deserialize)]
 struct CodeResponse {
+    #[allow(dead_code)]
     email: String,
     code: String,
+    #[allow(dead_code)]
     time: String,
 }
 
@@ -62,11 +64,17 @@ struct ErrorResponse {
 
 impl CustomTempMailClient {
     /// 创建新的客户端
-    pub fn new(config: CustomTempMailConfig) -> Self {
+    pub fn new(mut config: CustomTempMailConfig) -> Self {
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
+        
+        // 确保 API URL 有协议前缀
+        let api_url = config.api_url.trim();
+        if !api_url.is_empty() && !api_url.starts_with("http://") && !api_url.starts_with("https://") {
+            config.api_url = format!("https://{}", api_url);
+        }
         
         Self {
             config,
@@ -84,13 +92,7 @@ impl CustomTempMailClient {
         let email = format!("{}@{}", random_part, self.config.email_domain);
         self.current_email = Some(email.clone());
         
-        println!("[CustomTempMail] 生成邮箱: {}", email);
         email
-    }
-
-    /// 获取当前邮箱
-    pub fn get_email(&self) -> Option<&String> {
-        self.current_email.as_ref()
     }
 
     /// 等待并获取验证码
@@ -100,8 +102,6 @@ impl CustomTempMailClient {
         
         let start_time = std::time::Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
-        
-        println!("[CustomTempMail] 开始等待验证码，邮箱: {}，超时: {} 秒", email, timeout_secs);
         
         // 构建 API URL
         let api_url = format!(
@@ -119,17 +119,12 @@ impl CustomTempMailClient {
             
             // 查询验证码
             match self.query_code(&api_url).await {
-                Ok(code) => {
-                    println!("[CustomTempMail] 成功获取验证码: {}", code);
-                    return Ok(code);
-                }
+                Ok(code) => return Ok(code),
                 Err(e) => {
-                    // 如果是 404，说明还没收到邮件，继续等待
                     let error_msg = e.to_string();
-                    if error_msg.contains("404") || error_msg.contains("没收到邮件") {
-                        println!("[CustomTempMail] 尚未收到邮件，继续等待...");
-                    } else {
-                        println!("[CustomTempMail] 查询失败: {}", e);
+                    // 只有非 404 错误才打印
+                    if !error_msg.contains("404") && !error_msg.contains("没收到邮件") {
+                        eprintln!("[CustomTempMail] 查询失败: {}", e);
                     }
                 }
             }
@@ -144,13 +139,14 @@ impl CustomTempMailClient {
         let response = self.http_client
             .get(api_url)
             .send()
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("HTTP 请求失败: {}", e))?;
         
         let status = response.status();
-        let text = response.text().await?;
+        let text = response.text().await
+            .map_err(|e| anyhow::anyhow!("读取响应失败: {}", e))?;
         
         if status.is_success() {
-            // 解析成功响应
             let code_response: CodeResponse = serde_json::from_str(&text)
                 .map_err(|e| anyhow::anyhow!("解析响应失败: {}", e))?;
             
@@ -160,12 +156,10 @@ impl CustomTempMailClient {
             
             Ok(code_response.code)
         } else if status.as_u16() == 404 {
-            // 邮箱没有收到邮件
             let error: ErrorResponse = serde_json::from_str(&text)
                 .unwrap_or(ErrorResponse { error: "未收到邮件".to_string() });
             Err(anyhow::anyhow!("404: {}", error.error))
         } else {
-            // 其他错误
             let error: ErrorResponse = serde_json::from_str(&text)
                 .unwrap_or(ErrorResponse { error: format!("HTTP {}", status) });
             Err(anyhow::anyhow!("{}", error.error))

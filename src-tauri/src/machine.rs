@@ -1094,8 +1094,8 @@ pub fn delete_account_context_backup(account_id: &str) -> Result<()> {
 }
 
 /// 合并两个账号的对话记录到目标账号的备份中
-/// 这会将当前账号的 workspaceStorage 和 state.vscdb 中的对话合并到目标账号的备份
-/// 然后在切换时恢复这个合并后的备份
+/// 这会将当前账号的 workspaceStorage 中的对话合并到目标账号的备份
+/// 注意：不合并 state.vscdb，因为它包含加密数据，与特定账号绑定
 pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &str) -> Result<()> {
     let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
         .ok_or_else(|| anyhow!("无法获取应用数据目录"))?;
@@ -1114,7 +1114,8 @@ pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &
     
     let mut total_merged = 0;
     
-    // 1. 合并 workspaceStorage
+    // 只合并 workspaceStorage（包含非加密的对话记录）
+    // 注意：不合并 state.vscdb，因为它包含加密数据，与特定账号绑定
     if workspace_src.exists() {
         match merge_workspace_storage(&workspace_src, &target_workspace) {
             Ok(count) => {
@@ -1129,28 +1130,7 @@ pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &
         println!("[INFO] 当前账号 {} 没有 workspace 对话记录", current_account_id);
     }
     
-    // 2. 合并 state.vscdb（SQLite 数据库文件）
-    // 策略：如果目标没有 state.vscdb，直接复制；如果有，保留目标的（因为无法简单合并 SQLite）
-    let current_state = current_backup_dir.join("state.vscdb");
-    let target_state = target_backup_dir.join("state.vscdb");
-    
-    if current_state.exists() && !target_state.exists() {
-        // 目标没有 state.vscdb，复制当前的
-        match fs::copy(&current_state, &target_state) {
-            Ok(_) => {
-                println!("[INFO] 已复制当前账号的 state.vscdb 到目标账号备份");
-                total_merged += 1;
-            }
-            Err(e) => {
-                println!("[WARN] 复制 state.vscdb 失败: {}", e);
-            }
-        }
-    } else if current_state.exists() && target_state.exists() {
-        // 两者都有 state.vscdb，保留目标的（因为 SQLite 无法简单合并）
-        println!("[INFO] 目标账号已有 state.vscdb，保留目标的数据库文件");
-    }
-    
-    println!("[INFO] 对话合并完成，共处理 {} 个记录/文件", total_merged);
+    println!("[INFO] 对话合并完成，共处理 {} 个记录", total_merged);
     Ok(())
 }
 
@@ -1187,13 +1167,27 @@ fn merge_workspace_storage(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
             let file_name_str = file_name.to_string_lossy();
             
             if file_name_str.ends_with(".vscdb") {
-                // SQLite 数据库文件是二进制格式，无法合并，直接复制（如果不存在）
+                // SQLite 数据库文件是二进制格式，无法合并
+                // 策略：重命名并复制，保留两个文件
                 if !dst_path.exists() {
                     fs::copy(&src_path, &dst_path)?;
                     println!("[INFO] 已复制数据库文件: {}", file_name_str);
                     merged_count += 1;
                 } else {
-                    println!("[INFO] 数据库文件已存在，跳过: {}", file_name_str);
+                    // 目标已存在，创建副本
+                    let mut counter = 1;
+                    let mut new_dst_path = dst.with_file_name(format!("{}_{}.vscdb", 
+                        file_name_str.strip_suffix(".vscdb").unwrap_or(&file_name_str), 
+                        counter));
+                    while new_dst_path.exists() {
+                        counter += 1;
+                        new_dst_path = dst.with_file_name(format!("{}_{}.vscdb", 
+                            file_name_str.strip_suffix(".vscdb").unwrap_or(&file_name_str), 
+                            counter));
+                    }
+                    fs::copy(&src_path, &new_dst_path)?;
+                    println!("[INFO] 数据库文件已存在，创建副本: {}", new_dst_path.file_name().unwrap_or_default().to_string_lossy());
+                    merged_count += 1;
                 }
             } else if file_name_str.ends_with(".json") {
                 // JSON 文件可以尝试合并

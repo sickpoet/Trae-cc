@@ -63,11 +63,17 @@ export function ContextMenu({
           </div>
         ) : (
           <>
-            <div className="context-menu-item" onClick={onSwitchAccount}>
+            <div className="context-menu-item" onClick={() => {
+              console.log("[ContextMenu] 点击了普通切换账号");
+              onSwitchAccount();
+            }}>
               <span className="icon">🔀</span>
               切换账号
             </div>
-            <div className="context-menu-item" onClick={onSwitchAccountWithMerge}>
+            <div className="context-menu-item" onClick={() => {
+              console.log("[ContextMenu] 点击了切换账号（对话互通）");
+              onSwitchAccountWithMerge?.();
+            }}>
               <span className="icon">🌐</span>
               切换账号（对话互通）
             </div>
