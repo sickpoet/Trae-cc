@@ -13,7 +13,6 @@ import { ConfirmModal } from "./components/ConfirmModal";
 import { Stats } from "./pages/Stats";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
-import { Profile } from "./pages/Profile";
 
 import * as api from "./api";
 import type { Account, AccountBrief, AppSettings, UsageSummary } from "./types";
@@ -1141,8 +1140,6 @@ function App() {
             </main>
           </>
         )}
-
-        {currentPage === "profile" && <Profile onToast={addToast} />}
 
         {currentPage === "settings" && (
           <Settings
