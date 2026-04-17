@@ -9,6 +9,7 @@ export interface AccountBrief {
   created_at: number;
   machine_id: string | null;
   is_current: boolean; // 是否是当前 Trae IDE 正在使用的账号
+  user_id: string | null; // Trae 用户ID
 }
 
 // 完整账号信息

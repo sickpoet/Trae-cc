@@ -70,8 +70,13 @@ impl TraeApiClient {
             API_BASE_US.to_string()
         } else if cookies.contains("store-idc=alisg") || cookies.contains("trae-target-idc=alisg") {
             API_BASE_SG.to_string()
+        } else if cookies.contains("store-idc=apjpn") || cookies.contains("trae-target-idc=apjpn") {
+            // 日本区域使用 SG 的 API 基础域名
+            API_BASE_SG.to_string()
         } else if cookies.contains("store-country-code=us") {
             API_BASE_US.to_string()
+        } else if cookies.contains("store-country-code=jp") {
+            API_BASE_SG.to_string()
         } else {
             API_BASE_SG.to_string()
         }
@@ -794,14 +799,6 @@ pub async fn login_with_email(email: &str, password: &str) -> Result<EmailLoginR
         .send()
         .await?;
 
-    let login_url = "https://ug-normal.trae.ai/passport/web/email/login/";
-    let login_params = [
-        ("aid", "677332"),
-        ("account_sdk_source", "web"),
-        ("sdk_version", "2.1.10-tiktok"),
-        ("language", "en"),
-    ];
-
     let encoded_email = encode_xor_hex(email);
     let encoded_password = encode_xor_hex(password);
     let login_body = [
@@ -810,94 +807,271 @@ pub async fn login_with_email(email: &str, password: &str) -> Result<EmailLoginR
         ("email", encoded_email.as_str()),
         ("password", encoded_password.as_str()),
     ];
+    let login_params = [
+        ("aid", "677332"),
+        ("account_sdk_source", "web"),
+        ("sdk_version", "2.1.10-tiktok"),
+        ("language", "en"),
+    ];
 
-    let login_response = client
-        .post(login_url)
-        .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .header(header::ORIGIN, "https://www.trae.ai")
-        .header(header::REFERER, "https://www.trae.ai/")
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .query(&login_params)
-        .form(&login_body)
-        .send()
-        .await?;
+    // 尝试多个域名（SG -> US -> JP -> HK/TW）
+    let login_urls = [
+        "https://ug-normal.trae.ai/passport/web/email/login/",
+        "https://ug-normal.us.trae.ai/passport/web/email/login/",
+        "https://ug-normal.jp.trae.ai/passport/web/email/login/",
+        "https://ug-normal.sg.trae.ai/passport/web/email/login/",
+    ];
 
-    if !login_response.status().is_success() {
-        return Err(anyhow!("登录请求失败: {}", login_response.status()));
+    let mut last_error = String::new();
+    let mut login_result_json: Option<serde_json::Value> = None;
+    let mut successful_domain_idx = 0; // 记录成功登录的域名索引
+
+    for (idx, login_url) in login_urls.iter().enumerate() {
+        println!("[login_with_email] 尝试登录域名 {}: {}", idx + 1, login_url);
+        
+        let login_response = client
+            .post(*login_url)
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header(header::ORIGIN, "https://www.trae.ai")
+            .header(header::REFERER, "https://www.trae.ai/")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .query(&login_params)
+            .form(&login_body)
+            .send()
+            .await;
+
+        match login_response {
+            Ok(resp) => {
+                if let Ok(body) = resp.text().await {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let error_code = json.get("error_code")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or_else(|| {
+                                let ok = json.get("message")
+                                    .and_then(|v| v.as_str())
+                                    .map(|m| m.eq_ignore_ascii_case("success"))
+                                    .unwrap_or(false);
+                                if ok { 0 } else { -1 }
+                            });
+
+                        if error_code == 0 {
+                            println!("[login_with_email] ✅ 域名 {} 登录成功", idx + 1);
+                            login_result_json = Some(json);
+                            successful_domain_idx = idx; // 记录成功登录的域名索引
+                            break;
+                        } else {
+                            let desc = json.get("data")
+                                .and_then(|d| d.get("description"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("未知错误");
+                            println!("[login_with_email] 域名 {} 登录失败: {}", idx + 1, desc);
+                            last_error = format!("{}: {}", login_url, desc);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("[login_with_email] 域名 {} 请求失败: {}", idx + 1, e);
+                last_error = format!("{}: {}", login_url, e);
+            }
+        }
     }
 
-    let login_result: serde_json::Value = login_response.json().await?;
+    let _login_result = match login_result_json {
+        Some(json) => json,
+        None => return Err(anyhow!("所有登录域名都失败，最后一个错误: {}", last_error)),
+    };
 
-    let error_code = login_result.get("error_code")
-        .and_then(|v| v.as_i64())
-        .unwrap_or_else(|| {
-            let ok = login_result.get("message")
-                .and_then(|v| v.as_str())
-                .map(|m| m.eq_ignore_ascii_case("success"))
-                .unwrap_or(false);
-            if ok { 0 } else { -1 }
-        });
-
-    if error_code != 0 {
-        let description = login_result.get("description")
-            .and_then(|v| v.as_str())
-            .or_else(|| login_result.get("message").and_then(|v| v.as_str()))
-            .unwrap_or("未知错误");
-        println!("[login_with_email] ❌ 登录失败，响应: {:?}", login_result);
-        return Err(anyhow!("登录失败: {}", description));
-    }
-
-    let trae_login_url = "https://ug-normal.trae.ai/cloudide/api/v3/trae/Login?type=email";
-    println!("[login_with_email] 调用 Trae Login API: {}", trae_login_url);
-
+    // 根据登录成功的域名选择对应的 Trae Login URL
+    // 定义所有区域的 Trae Login URL（顺序与 login_urls 对应）
+    let trae_login_urls = [
+        "https://ug-normal.trae.ai/cloudide/api/v3/trae/Login?type=email",
+        "https://ug-normal.us.trae.ai/cloudide/api/v3/trae/Login?type=email",
+        "https://ug-normal.jp.trae.ai/cloudide/api/v3/trae/Login?type=email",
+        "https://ug-normal.sg.trae.ai/cloudide/api/v3/trae/Login?type=email",
+    ];
+    
+    // 优先使用登录成功的域名，然后尝试其他域名
+    let mut trae_login_success = false;
+    // successful_domain_idx 已经在前面定义并记录了成功登录的域名索引
+    
+    // 先尝试登录成功的域名
+    let primary_trae_url = trae_login_urls[successful_domain_idx];
+    println!("[login_with_email] 尝试主 Trae Login API: {}", primary_trae_url);
+    
     let trae_login_response = client
-        .post(trae_login_url)
+        .post(primary_trae_url)
         .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .header(header::ORIGIN, "https://www.trae.ai")
         .header(header::REFERER, "https://www.trae.ai/")
         .header(header::CONTENT_TYPE, "application/json")
         .send()
-        .await?;
+        .await;
 
-    let trae_status = trae_login_response.status();
-    let trae_body = trae_login_response.text().await?;
-    println!("[login_with_email] Trae Login 响应状态: {}", trae_status);
-    println!("[login_with_email] Trae Login 响应内容: {}", &trae_body[..trae_body.len().min(500)]);
+    match trae_login_response {
+        Ok(resp) => {
+            let trae_status = resp.status();
+            let _ = resp.text().await;
+            println!("[login_with_email] 主 Trae Login 响应状态: {}", trae_status);
+            if trae_status.is_success() {
+                println!("[login_with_email] ✅ 主 Trae Login 成功");
+                trae_login_success = true;
+            }
+        }
+        Err(e) => {
+            println!("[login_with_email] 主 Trae Login 请求失败: {}", e);
+        }
+    }
+    
+    // 如果主域名失败，尝试其他域名
+    if !trae_login_success {
+        for (idx, trae_login_url) in trae_login_urls.iter().enumerate() {
+            if idx == successful_domain_idx {
+                continue; // 跳过已经尝试过的主域名
+            }
+            
+            println!("[login_with_email] 尝试备用 Trae Login API: {}", trae_login_url);
+            
+            let trae_login_response = client
+                .post(*trae_login_url)
+                .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .header(header::ORIGIN, "https://www.trae.ai")
+                .header(header::REFERER, "https://www.trae.ai/")
+                .header(header::CONTENT_TYPE, "application/json")
+                .send()
+                .await;
 
-    if !trae_status.is_success() {
-        return Err(anyhow!("Trae 登录失败: {} - {}", trae_status, &trae_body[..trae_body.len().min(200)]));
+            match trae_login_response {
+                Ok(resp) => {
+                    let trae_status = resp.status();
+                    let _ = resp.text().await;
+                    println!("[login_with_email] 备用 Trae Login 响应状态: {}", trae_status);
+                    if trae_status.is_success() {
+                        println!("[login_with_email] ✅ 备用 Trae Login 成功");
+                        trae_login_success = true;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("[login_with_email] 备用 Trae Login 请求失败: {}", e);
+                }
+            }
+        }
+    }
+
+    if !trae_login_success {
+        return Err(anyhow!("所有 Trae Login API 都失败"));
     }
 
     let check_url = Url::parse("https://www.trae.ai")?;
-    let cookies_str = cookie_jar.cookies(&check_url)
+    let _cookies_str = cookie_jar.cookies(&check_url)
         .map(|v| v.to_str().unwrap_or_default().to_string())
         .unwrap_or_default();
-    let api_base = TraeApiClient::detect_api_base_from_cookies(&cookies_str);
-
-    let token_url = format!("{}/cloudide/api/v3/common/GetUserToken", api_base);
-
+    
+    // 尝试多个域名获取 Token（使用 ug-normal 域名，与登录一致）
+    // 定义所有区域的 Token URL（顺序与 login_urls 对应）
+    let token_urls = [
+        "https://ug-normal.trae.ai/cloudide/api/v3/common/GetUserToken",
+        "https://ug-normal.us.trae.ai/cloudide/api/v3/common/GetUserToken",
+        "https://ug-normal.jp.trae.ai/cloudide/api/v3/common/GetUserToken",
+        "https://ug-normal.sg.trae.ai/cloudide/api/v3/common/GetUserToken",
+    ];
+    
+    let mut token_result: Option<(GetUserTokenResponse, String)> = None;
+    // successful_domain_idx 已经在前面定义并记录了成功登录的域名索引
+    
+    // 先尝试登录成功的域名
+    let primary_token_url = token_urls[successful_domain_idx];
+    println!("[login_with_email] 尝试主 Token API: {}", primary_token_url);
+    
     let token_response = client
-        .post(&token_url)
+        .post(primary_token_url)
         .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .header(header::ORIGIN, "https://www.trae.ai")
         .header(header::REFERER, "https://www.trae.ai/")
         .header(header::CONTENT_TYPE, "application/json")
         .send()
-        .await?;
+        .await;
 
-    if !token_response.status().is_success() {
-        return Err(anyhow!("获取 Token 失败: {}", token_response.status()));
+    match token_response {
+        Ok(resp) => {
+            let status = resp.status();
+            println!("[login_with_email] 主 Token 响应状态: {}", status);
+            if status.is_success() {
+                match resp.json::<GetUserTokenResponse>().await {
+                    Ok(data) => {
+                        println!("[login_with_email] ✅ 主 Token 获取成功");
+                        token_result = Some((data, primary_token_url.to_string()));
+                    }
+                    Err(e) => println!("[login_with_email] 主 Token 解析失败: {}", e),
+                }
+            }
+        }
+        Err(e) => println!("[login_with_email] 主 Token 请求失败: {}", e),
+    }
+    
+    // 如果主域名失败，尝试其他域名
+    if token_result.is_none() {
+        for (idx, token_url) in token_urls.iter().enumerate() {
+            if idx == successful_domain_idx {
+                continue; // 跳过已经尝试过的主域名
+            }
+            
+            println!("[login_with_email] 尝试备用 Token API: {}", token_url);
+            
+            let token_response = client
+                .post(*token_url)
+                .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .header(header::ORIGIN, "https://www.trae.ai")
+                .header(header::REFERER, "https://www.trae.ai/")
+                .header(header::CONTENT_TYPE, "application/json")
+                .send()
+                .await;
+
+            match token_response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    println!("[login_with_email] 备用 Token 响应状态: {}", status);
+                    if status.is_success() {
+                        match resp.json::<GetUserTokenResponse>().await {
+                            Ok(data) => {
+                                println!("[login_with_email] ✅ 备用 Token 获取成功");
+                                token_result = Some((data, token_url.to_string()));
+                                break;
+                            }
+                            Err(e) => println!("[login_with_email] 备用 Token 解析失败: {}", e),
+                        }
+                    }
+                }
+                Err(e) => println!("[login_with_email] 备用 Token 请求失败: {}", e),
+            }
+        }
     }
 
-    let token_data: GetUserTokenResponse = token_response.json().await?;
+    let (token_data, successful_token_url) = match token_result {
+        Some((data, url)) => (data, url),
+        None => return Err(anyhow!("所有 Token API 都失败")),
+    };
 
-    let token_url_parsed = Url::parse(&token_url)?;
+    let token_url_parsed = Url::parse(&successful_token_url)?;
     let mut cookies = cookie_jar
         .cookies(&token_url_parsed)
         .map(|v| v.to_str().unwrap_or_default().to_string())
         .unwrap_or_default();
+    
+    // 根据成功的 Token URL 设置正确的 store-idc
     if !cookies.is_empty() && !cookies.contains("store-idc=") && !cookies.contains("trae-target-idc=") {
-        cookies = format!("{cookies}; store-idc=alisg");
+        let idc = if successful_token_url.contains(".us.") {
+            "useast5"
+        } else if successful_token_url.contains(".jp.") {
+            "apjpn1"
+        } else if successful_token_url.contains(".sg.") {
+            "alisg"
+        } else {
+            "alisg" // 默认新加坡
+        };
+        cookies = format!("{cookies}; store-idc={idc}");
+        println!("[login_with_email] 设置 store-idc: {}", idc);
     }
 
     println!("[login_with_email] ✅ 登录成功，获取到 cookies (长度: {})", cookies.len());
@@ -910,4 +1084,241 @@ pub async fn login_with_email(email: &str, password: &str) -> Result<EmailLoginR
         cookies,
         expired_at: token_data.result.expired_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::{header, Client};
+    use reqwest::cookie::Jar;
+    use std::sync::Arc;
+
+    fn encode_xor_hex(input: &str) -> String {
+        input
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b ^ 0x05))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[tokio::test]
+    async fn test_login_step_by_step() {
+        // 从环境变量获取测试凭据，避免硬编码敏感信息
+        let email = std::env::var("TEST_EMAIL").unwrap_or_else(|_| "test@example.com".to_string());
+        let password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_string());
+
+        println!("========== 开始分步测试登录 ==========");
+        println!("邮箱: {}", email);
+        
+        let cookie_jar = Arc::new(Jar::default());
+        let client = Client::builder()
+            .cookie_store(true)
+            .cookie_provider(cookie_jar.clone())
+            .build()
+            .expect("创建客户端失败");
+
+        // 步骤 1: 访问登录页面初始化
+        println!("\n[步骤 1] 访问登录页面初始化...");
+        let init_url = "https://www.trae.ai/login";
+        let init_response = client
+            .get(init_url)
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .send()
+            .await;
+        
+        match init_response {
+            Ok(resp) => println!("  初始化响应状态: {}", resp.status()),
+            Err(e) => println!("  初始化失败: {}", e),
+        }
+
+        // 步骤 2: 发送登录请求
+        println!("\n[步骤 2] 发送登录请求...");
+        let login_url = "https://ug-normal.trae.ai/passport/web/email/login/";
+        let login_params = [
+            ("aid", "677332"),
+            ("account_sdk_source", "web"),
+            ("sdk_version", "2.1.10-tiktok"),
+            ("language", "en"),
+        ];
+
+        let encoded_email = encode_xor_hex(email);
+        let encoded_password = encode_xor_hex(password);
+        
+        println!("  原始邮箱: {}", email);
+        println!("  编码后邮箱: {}", encoded_email);
+        println!("  登录URL: {}", login_url);
+
+        let login_body = [
+            ("mix_mode", "1"),
+            ("fixed_mix_mode", "1"),
+            ("email", encoded_email.as_str()),
+            ("password", encoded_password.as_str()),
+        ];
+
+        let login_response = client
+            .post(login_url)
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header(header::ORIGIN, "https://www.trae.ai")
+            .header(header::REFERER, "https://www.trae.ai/")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .query(&login_params)
+            .form(&login_body)
+            .send()
+            .await;
+
+        match login_response {
+            Ok(resp) => {
+                println!("  登录响应状态: {}", resp.status());
+                let headers = resp.headers().clone();
+                println!("  响应头:");
+                for (key, value) in headers.iter() {
+                    println!("    {}: {:?}", key, value);
+                }
+                
+                match resp.text().await {
+                    Ok(body) => {
+                        println!("  响应体: {}", body);
+                        
+                        // 尝试解析 JSON
+                        match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(json) => {
+                                println!("  解析后的 JSON: {:#}", json);
+                                
+                                let error_code = json.get("error_code")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(-1);
+                                println!("  错误码: {}", error_code);
+                                
+                                if let Some(data) = json.get("data") {
+                                    println!("  data 字段: {:#}", data);
+                                }
+                            }
+                            Err(e) => println!("  JSON 解析失败: {}", e),
+                        }
+                    }
+                    Err(e) => println!("  读取响应体失败: {}", e),
+                }
+            }
+            Err(e) => println!("  登录请求失败: {}", e),
+        }
+
+        println!("\n========== 测试完成 ==========");
+    }
+
+    #[tokio::test]
+    async fn test_login_with_email() {
+        // 从环境变量获取测试凭据，避免硬编码敏感信息
+        let email = std::env::var("TEST_EMAIL").unwrap_or_else(|_| "test@example.com".to_string());
+        let password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_string());
+
+        println!("开始测试完整登录流程: {}", email);
+        
+        match login_with_email(email, password).await {
+            Ok(result) => {
+                println!("✅ 登录成功!");
+                println!("   User ID: {}", result.user_id);
+                println!("   Tenant ID: {}", result.tenant_id);
+                println!("   Token: {}...", &result.token[..50.min(result.token.len())]);
+                println!("   Cookies 长度: {}", result.cookies.len());
+                println!("   Expired At: {}", result.expired_at);
+            }
+            Err(e) => {
+                println!("❌ 登录失败: {}", e);
+                panic!("登录测试失败: {}", e);
+            }
+        }
+    }
+
+    /// 测试使用不同的 API 域名登录
+    #[tokio::test]
+    async fn test_login_with_us_domain() {
+        // 从环境变量获取测试凭据，避免硬编码敏感信息
+        let email = std::env::var("TEST_EMAIL").unwrap_or_else(|_| "test@example.com".to_string());
+        let password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_string());
+
+        println!("========== 测试使用 us.trae.ai 域名登录 ==========");
+        println!("邮箱: {}", email);
+        
+        let cookie_jar = Arc::new(Jar::default());
+        let client = Client::builder()
+            .cookie_store(true)
+            .cookie_provider(cookie_jar.clone())
+            .build()
+            .expect("创建客户端失败");
+
+        // 步骤 1: 访问登录页面初始化
+        println!("\n[步骤 1] 访问登录页面初始化...");
+        let init_url = "https://www.trae.ai/login";
+        let _ = client
+            .get(init_url)
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .send()
+            .await;
+
+        // 步骤 2: 使用 us.trae.ai 域名发送登录请求
+        println!("\n[步骤 2] 使用 ug-normal.us.trae.ai 发送登录请求...");
+        let login_url = "https://ug-normal.us.trae.ai/passport/web/email/login/";
+        let login_params = [
+            ("aid", "677332"),
+            ("account_sdk_source", "web"),
+            ("sdk_version", "2.1.10-tiktok"),
+            ("language", "en"),
+        ];
+
+        let encoded_email = encode_xor_hex(email);
+        let encoded_password = encode_xor_hex(password);
+        
+        println!("  登录URL: {}", login_url);
+
+        let login_body = [
+            ("mix_mode", "1"),
+            ("fixed_mix_mode", "1"),
+            ("email", encoded_email.as_str()),
+            ("password", encoded_password.as_str()),
+        ];
+
+        let login_response = client
+            .post(login_url)
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            .header(header::ORIGIN, "https://www.trae.ai")
+            .header(header::REFERER, "https://www.trae.ai/")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .query(&login_params)
+            .form(&login_body)
+            .send()
+            .await;
+
+        match login_response {
+            Ok(resp) => {
+                println!("  登录响应状态: {}", resp.status());
+                
+                match resp.text().await {
+                    Ok(body) => {
+                        println!("  响应体: {}", body);
+                        
+                        match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(json) => {
+                                println!("  解析后的 JSON: {:#}", json);
+                                
+                                if let Some(data) = json.get("data") {
+                                    if let Some(error_code) = data.get("error_code").and_then(|v| v.as_i64()) {
+                                        println!("  错误码: {}", error_code);
+                                    }
+                                    if let Some(desc) = data.get("description").and_then(|v| v.as_str()) {
+                                        println!("  错误描述: {}", desc);
+                                    }
+                                }
+                            }
+                            Err(e) => println!("  JSON 解析失败: {}", e),
+                        }
+                    }
+                    Err(e) => println!("  读取响应体失败: {}", e),
+                }
+            }
+            Err(e) => println!("  登录请求失败: {}", e),
+        }
+
+        println!("\n========== 测试完成 ==========");
+    }
 }

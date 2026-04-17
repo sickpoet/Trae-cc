@@ -10,6 +10,7 @@ interface AccountCardProps {
     plan_type: string;
     created_at: number;
     is_current?: boolean;
+    user_id?: string | null;
   };
   usage: UsageSummary | null;
   selected: boolean;
@@ -118,6 +119,9 @@ export function AccountCard({ account, usage, selected, onSelect, onContextMenu,
                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
               </svg>
             </button>
+          </div>
+          <div className="card-id" style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>
+            UID: {account.user_id || account.id}
           </div>
           <div className="card-badges">
             {(usage?.plan_type || account.plan_type) !== "Free" && (
