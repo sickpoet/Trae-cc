@@ -12,6 +12,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "url": "index.html",
         "title": "Trae账号管理",
         "width": 1000,
         "height": 700,
@@ -24,7 +26,7 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
