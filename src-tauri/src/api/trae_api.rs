@@ -90,8 +90,15 @@ impl TraeApiClient {
         headers.insert(header::REFERER, "https://www.trae.ai/".parse()?);
         headers.insert(
             header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36".parse()?,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".parse()?,
         );
+
+        // 添加 cookies（如果有的话）
+        if !self.cookies.trim().is_empty() {
+            let cookie_value = header::HeaderValue::from_bytes(self.cookies.as_bytes())
+                .map_err(|e| anyhow!("Cookie 格式错误: {}", e))?;
+            headers.insert(header::COOKIE, cookie_value);
+        }
 
         if let Some(token) = &self.jwt_token {
             let auth_value = header::HeaderValue::from_bytes(
