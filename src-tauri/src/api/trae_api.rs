@@ -1104,8 +1104,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_step_by_step() {
-        let email = "qad77@exbts.com";
-        let password = "$K9nA&@w#TXV";
+        // 从环境变量获取测试凭据，避免硬编码敏感信息
+        let email = std::env::var("TEST_EMAIL").unwrap_or_else(|_| "test@example.com".to_string());
+        let password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_string());
 
         println!("========== 开始分步测试登录 ==========");
         println!("邮箱: {}", email);
@@ -1207,8 +1208,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_with_email() {
-        let email = "qad77@exbts.com";
-        let password = "$K9nA&@w#TXV";
+        // 从环境变量获取测试凭据，避免硬编码敏感信息
+        let email = std::env::var("TEST_EMAIL").unwrap_or_else(|_| "test@example.com".to_string());
+        let password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_string());
 
         println!("开始测试完整登录流程: {}", email);
         
@@ -1231,8 +1233,9 @@ mod tests {
     /// 测试使用不同的 API 域名登录
     #[tokio::test]
     async fn test_login_with_us_domain() {
-        let email = "qad77@exbts.com";
-        let password = "$K9nA&@w#TXV";
+        // 从环境变量获取测试凭据，避免硬编码敏感信息
+        let email = std::env::var("TEST_EMAIL").unwrap_or_else(|_| "test@example.com".to_string());
+        let password = std::env::var("TEST_PASSWORD").unwrap_or_else(|_| "test_password".to_string());
 
         println!("========== 测试使用 us.trae.ai 域名登录 ==========");
         println!("邮箱: {}", email);
