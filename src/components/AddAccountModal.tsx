@@ -1,7 +1,27 @@
 import { useRef, useState, useEffect } from "react";
 import * as api from "../api";
 import type { Account, AppSettings } from "../types";
+import type { ErrorCode } from "../types/errorCodes";
+import { parseBackendError } from "../types/errorCodes";
 import { WorkerSetupGuide } from "./WorkerSetupGuide";
+import { ErrorModal } from "./ErrorModal";
+import {
+  getStoredUserInfo,
+  getCurrentOpenid,
+  getCurrentPlatformId,
+  initOrUpdateUserInfo,
+  recordClaim,
+  clearUserInfo,
+  getTodayClaimCount,
+  getRemainingClaims,
+  savePcToken,
+  getPcToken,
+  clearPcToken,
+  getPcTokenRemainingTime,
+  getCurrentVirtualId,
+  updateUserVirtualId,
+  type StoredUserInfo,
+} from "../utils/userStorage";
 
 interface AddAccountModalProps {
   isOpen: boolean;
@@ -18,7 +38,26 @@ interface AddAccountModalProps {
 
 type AddMode = "browser" | "register" | "quick-register" | "more";
 type MoreSubMode = "trae-ide" | "import-export" | null;
-type QuickRegisterStep = "initial" | "qrcode" | "waiting" | "claiming" | "success" | "manual" | "error";
+// 新流程步骤：扫码 -> 换取 Token -> 显示用户信息 -> 领取
+type QuickRegisterStep = 
+  | "initial"      // 初始状态，检查是否有有效 Token
+  | "qrcode"       // 展示二维码，等待扫码
+  | "waiting"      // 轮询等待验证
+  | "exchanging"   // 换取 PC Token 中
+  | "verified"     // 已验证，显示用户信息和领取按钮
+  | "claiming"     // 领取资源中
+  | "success"      // 领取成功
+  | "manual"       // 手动导入
+  | "error";       // 错误状态
+
+// 历史记录项类型
+interface RegisterHistoryItem {
+  id: string;
+  timestamp: number;
+  status: "success" | "failed" | "manual";
+  accounts: { account: string; password: string }[];
+  errorMessage?: string;
+}
 
 // 注册进度步骤
 const REGISTER_STEPS = [
@@ -32,13 +71,6 @@ const REGISTER_STEPS = [
   { percent: 95, message: "保存账号信息..." },
   { percent: 100, message: "注册完成!" },
 ];
-
-// 生成随机平台ID
-function generatePlatformId(): string {
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).substring(2, 8);
-  return `user_${timestamp}_${random}`;
-}
 
 export function AddAccountModal({
   isOpen,
@@ -65,6 +97,8 @@ export function AddAccountModal({
   // 浏览器登录表单状态
   const [loginProgress, setLoginProgress] = useState(0);
   const [loginStatus, setLoginStatus] = useState("");
+  const [browserEmail, setBrowserEmail] = useState("");
+  const [browserPassword, setBrowserPassword] = useState("");
   
   // 快速注册进度状态
   const [registerProgress, setRegisterProgress] = useState(0);
@@ -83,12 +117,36 @@ export function AddAccountModal({
   const [availableCount, setAvailableCount] = useState<number | null>(null);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // 用户信息
+  const [userInfo, setUserInfo] = useState<StoredUserInfo | null>(null);
+  const [todayClaimed, setTodayClaimed] = useState(0);
+  const [remainingQuota, setRemainingQuota] = useState(0);
+
+  // ===== 新流程状态 =====
+  const [, setPcToken] = useState<string | null>(null);                  // PC 绑定令牌
+  const [userOpenid, setUserOpenid] = useState<string | null>(null);     // 当前用户 OpenID
+  const [userVirtualId, setUserVirtualId] = useState<string | null>(null); // 当前用户 Virtual ID（显示用）
+  const [baseLimit, setBaseLimit] = useState(2);                         // 基础每日限额
+  const [bonusLimit, setBonusLimit] = useState(0);                       // 邀请奖励剩余额度
+  const [tokenCountdown, setTokenCountdown] = useState(600);             // Token 倒计时
+  const [, setCanClaim] = useState(false);                               // 是否可以领取
+  const [claimCooldown, setClaimCooldown] = useState(0);                 // 领取按钮冷却时间
+  const [isUsingBonusQuota, setIsUsingBonusQuota] = useState(false);     // 是否正在使用邀请奖励额度
+
+  // 历史记录弹窗状态
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [registerHistory, setRegisterHistory] = useState<RegisterHistoryItem[]>([]);
+
+  // 错误弹窗状态
+  const [errorModalOpen, setErrorModalOpen] = useState(false);
+  const [errorCode, setErrorCode] = useState<ErrorCode | null>(null);
+  const [errorMessage, setErrorMessage] = useState("");
   
   // ===== 邀请码相关状态 =====
   const [inviteCode, setInviteCode] = useState("");
   const [claimMessage, setClaimMessage] = useState("");
   const [myInviteCode, setMyInviteCode] = useState("");
-  const [isCriticalHit, setIsCriticalHit] = useState(false);
   
   // ===== 轮询取消函数 =====
   const cancelPollingRef = useRef<(() => void) | null>(null);
@@ -125,7 +183,90 @@ export function AddAccountModal({
     }
   }, [isOpen]);
 
-  // 倒计时效果
+  // 加载用户信息
+  useEffect(() => {
+    if (isOpen) {
+      const stored = getStoredUserInfo();
+      setUserInfo(stored);
+
+      // 加载 virtualId
+      const storedVirtualId = getCurrentVirtualId();
+      if (storedVirtualId) {
+        setUserVirtualId(storedVirtualId);
+      }
+
+      // 检查是否有有效的 PC Token
+      const existingToken = getPcToken();
+      if (existingToken) {
+        setPcToken(existingToken);
+        setTokenCountdown(getPcTokenRemainingTime());
+
+        // 如果有 PC Token，从后端获取最新的配额信息
+        const fetchUserInfo = async () => {
+          try {
+            const userResponse = await api.getUserInfo(existingToken);
+            if (userResponse.success) {
+              const { basic, claim_limit } = userResponse.data;
+
+              // 更新用户信息
+              setUserOpenid(basic.openid);
+              setUserVirtualId(basic.virtual_id);
+              setTodayClaimed(claim_limit.current_usage);
+              setRemainingQuota(claim_limit.remaining);
+              setBaseLimit(claim_limit.base_limit);
+              setBonusLimit(claim_limit.bonus_limit);
+              setCanClaim(claim_limit.remaining > 0);
+              setIsUsingBonusQuota(claim_limit.current_usage >= claim_limit.base_limit && claim_limit.remaining > 0);
+
+              // 更新本地存储
+              const platformId = getCurrentPlatformId();
+              initOrUpdateUserInfo(basic.openid, platformId, basic.virtual_id);
+
+              // 如果还有剩余次数，自动进入已验证状态
+              if (claim_limit.remaining > 0) {
+                setQrStep("verified");
+              }
+            } else {
+              // Token 无效，清除本地状态
+              clearPcToken();
+              setPcToken(null);
+              // 回退到本地存储的数据
+              setTodayClaimed(getTodayClaimCount());
+              setRemainingQuota(getRemainingClaims());
+              onToast?.("warning", "登录已过期，请重新扫码");
+            }
+          } catch (error) {
+            console.error("获取用户信息失败:", error);
+            // 回退到本地存储的数据
+            setTodayClaimed(getTodayClaimCount());
+            setRemainingQuota(getRemainingClaims());
+            onToast?.("error", "获取用户信息失败，请重新扫码");
+          }
+        };
+
+        void fetchUserInfo();
+      } else {
+        // 没有 PC Token，使用本地存储的数据
+        setTodayClaimed(getTodayClaimCount());
+        setRemainingQuota(getRemainingClaims());
+      }
+    }
+  }, [isOpen]);
+
+  // 加载历史记录
+  useEffect(() => {
+    const saved = localStorage.getItem("quick_register_history");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setRegisterHistory(parsed);
+      } catch (e) {
+        console.error("解析历史记录失败:", e);
+      }
+    }
+  }, []);
+
+  // 二维码倒计时效果
   useEffect(() => {
     if (qrStep !== "qrcode" && qrStep !== "waiting") return;
 
@@ -143,6 +284,45 @@ export function AddAccountModal({
 
     return () => clearInterval(timer);
   }, [qrStep]);
+
+  // Token 有效期倒计时
+  useEffect(() => {
+    if (qrStep !== "verified") return;
+
+    const timer = setInterval(() => {
+      const remaining = getPcTokenRemainingTime();
+      if (remaining <= 0) {
+        clearInterval(timer);
+        // Token 过期，返回初始状态
+        setQrStep("initial");
+        setQrError("登录已过期，请重新扫码");
+        clearPcToken();
+        setPcToken(null);
+        setTokenCountdown(0);
+      } else {
+        setTokenCountdown(remaining);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [qrStep]);
+
+  // 领取按钮冷却倒计时
+  useEffect(() => {
+    if (claimCooldown <= 0) return;
+
+    const timer = setInterval(() => {
+      setClaimCooldown((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [claimCooldown]);
 
   if (!isOpen) return null;
 
@@ -176,6 +356,37 @@ export function AddAccountModal({
     setRegisterStatus("");
   };
 
+  // 保存历史记录到 localStorage
+  const saveHistory = (history: RegisterHistoryItem[]) => {
+    localStorage.setItem("quick_register_history", JSON.stringify(history));
+    setRegisterHistory(history);
+  };
+
+  // 添加历史记录
+  const addHistory = (item: Omit<RegisterHistoryItem, "id" | "timestamp">) => {
+    const newItem: RegisterHistoryItem = {
+      ...item,
+      id: Date.now().toString(),
+      timestamp: Date.now(),
+    };
+    const updated = [newItem, ...registerHistory].slice(0, 50); // 最多保留50条
+    saveHistory(updated);
+  };
+
+  // 显示错误弹窗
+  const showErrorModal = (code: ErrorCode, message?: string) => {
+    setErrorCode(code);
+    setErrorMessage(message || "");
+    setErrorModalOpen(true);
+  };
+
+  // 关闭错误弹窗
+  const closeErrorModal = () => {
+    setErrorModalOpen(false);
+    setErrorCode(null);
+    setErrorMessage("");
+  };
+
   // 重置扫码领号状态
   const resetQrState = () => {
     setQrStep("initial");
@@ -189,7 +400,16 @@ export function AddAccountModal({
     setInviteCode("");
     setClaimMessage("");
     setMyInviteCode("");
-    setIsCriticalHit(false);
+    // 新流程状态重置
+    setPcToken(null);
+    setUserOpenid(null);
+    setUserVirtualId(null);
+    setBaseLimit(2);
+    setBonusLimit(0);
+    setTokenCountdown(600);
+    setCanClaim(false);
+    setClaimCooldown(0);
+    setIsUsingBonusQuota(false);
   };
 
   const handleReadTraeAccount = async () => {
@@ -214,17 +434,18 @@ export function AddAccountModal({
 
   // 浏览器自动登录
   const handleBrowserAutoLogin = async () => {
+    if (!browserEmail || !browserPassword) {
+      setError("请输入邮箱和密码");
+      return;
+    }
+
     setLoading(true);
     setError("");
     setLoginProgress(10);
     setLoginStatus("正在打开浏览器...");
 
     try {
-      await api.startBrowserLogin();
-      setLoginProgress(30);
-      setLoginStatus("请在浏览器中完成登录...");
-      
-      const account = await api.finishBrowserLogin();
+      const account = await api.browserAutoLogin(browserEmail, browserPassword);
       
       setLoginProgress(100);
       setLoginStatus("登录成功!");
@@ -235,6 +456,8 @@ export function AddAccountModal({
         setLoading(false);
         setLoginProgress(0);
         setLoginStatus("");
+        setBrowserEmail("");
+        setBrowserPassword("");
         onClose();
         onToast?.("success", `登录成功，已导入账号: ${account.email}`);
       }, 800);
@@ -305,22 +528,38 @@ export function AddAccountModal({
     setQrError("");
 
     try {
-      const platformId = generatePlatformId();
-      const response = await api.createQuickRegisterTask(platformId);
+      // 获取当前用户的 platformId 和 openid（如果有）
+      const platformId = getCurrentPlatformId();
+      const openid = getCurrentOpenid();
+
+      // 创建任务（传递 openid 以便后端识别老用户）
+      const response = await api.createQuickRegisterTaskWithOpenid({
+        platformId,
+        openid: openid || undefined,
+      });
       setTicket(response.ticket);
       setQrcodeUrl(response.qrcode_url);
       setQrStep("qrcode");
       setCountdown(600);
       onToast?.("info", "请使用微信扫描二维码");
     } catch (err: any) {
-      setQrError(err.message || "获取二维码失败");
+      // 解析后端错误码并使用 ErrorModal
+      const { code, message } = parseBackendError(err);
+      showErrorModal(code, message);
+      setQrError(message);
       setQrStep("error");
+      // 添加到历史记录
+      addHistory({
+        status: "failed",
+        accounts: [],
+        errorMessage: message,
+      });
     } finally {
       setIsQrLoading(false);
     }
   };
 
-  // 开始轮询验证
+  // 开始轮询验证（新流程）
   const startPolling = async (ticketToUse: string) => {
     if (!ticketToUse) return;
 
@@ -347,78 +586,192 @@ export function AddAccountModal({
       clearTimeout(autoCancelTimeout);
       cancelPollingRef.current = null;
 
-      setQrStep("claiming");
-      onToast?.("success", "验证成功，正在获取账号...");
+      // 进入换取 Token 步骤
+      setQrStep("exchanging");
+      onToast?.("info", "正在换取登录凭证...");
 
-      let accountsData: { account: string; password: string }[] = [];
-      let responseMessage = "";
-
-      if (finalStatus.status === "claimed" && finalStatus.resource_payload) {
-        accountsData = finalStatus.resource_payload;
-      } else {
-        // 传递邀请码领取资源
-        const resourceResponse = await api.claimResource(ticketToUse, inviteCode || undefined);
-        if (!resourceResponse.success) {
-          throw new Error(resourceResponse.message || "领取资源失败");
-        }
-        if (resourceResponse.resource_payload) {
-          accountsData = resourceResponse.resource_payload;
-        }
-        // 保存后端返回的 message
-        responseMessage = resourceResponse.message || "";
-        setClaimMessage(responseMessage);
-        
-        // 判断是否暴击（账号数量 > 1）
-        const isCrit = accountsData.length > 1;
-        setIsCriticalHit(isCrit);
-        
-        // 从 message 中提取用户的专属邀请码
-        const inviteCodeMatch = responseMessage.match(/您的专属邀请码[：:]\s*([A-Z0-9]+)/i);
-        if (inviteCodeMatch) {
-          const extractedCode = inviteCodeMatch[1].toUpperCase();
-          setMyInviteCode(extractedCode);
-          // 保存到 localStorage
-          localStorage.setItem('my_invite_code', extractedCode);
-        }
+      // ===== 第二步：换取 PC 绑定令牌 =====
+      const tokenResponse = await api.exchangePcToken(ticketToUse);
+      
+      if (!tokenResponse.success || !tokenResponse.pc_bind_token) {
+        throw new Error(tokenResponse.message || "换取登录凭证失败");
       }
 
-      if (!accountsData || accountsData.length === 0) {
-        setQrError("后端返回的 resource_payload 为空");
+      // 保存 PC Token（有效期 24 小时）
+      savePcToken(tokenResponse.pc_bind_token, 86400);
+      setPcToken(tokenResponse.pc_bind_token);
+
+      // ===== 第三步：获取用户信息 =====
+      const userResponse = await api.getUserInfo(tokenResponse.pc_bind_token);
+      
+      if (!userResponse.success) {
+        throw new Error(userResponse.message || "获取用户信息失败");
+      }
+
+      // 从嵌套数据结构中提取用户信息
+      const { basic, claim_limit } = userResponse.data;
+      
+      // 保存用户信息
+      setUserOpenid(basic.openid);
+      setUserVirtualId(basic.virtual_id);  // 保存 virtual_id 用于显示
+      setTodayClaimed(claim_limit.current_usage);
+      setRemainingQuota(claim_limit.remaining);
+      setBaseLimit(claim_limit.base_limit);
+      setBonusLimit(claim_limit.bonus_limit);
+      setCanClaim(claim_limit.remaining > 0);
+
+      // 判断是否正在使用邀请奖励额度（基础额度已用完但还有剩余次数）
+      setIsUsingBonusQuota(claim_limit.current_usage >= claim_limit.base_limit && claim_limit.remaining > 0);
+
+      // 更新本地存储的用户信息（同时保存 virtualId）
+      const platformId = finalStatus.platform_id || getCurrentPlatformId();
+      const newUserInfo = initOrUpdateUserInfo(basic.openid, platformId, basic.virtual_id);
+      setUserInfo(newUserInfo);
+      
+      // 保存 virtualId 到本地存储
+      updateUserVirtualId(basic.virtual_id);
+
+      // 进入已验证状态，等待用户点击领取
+      setQrStep("verified");
+      setTokenCountdown(getPcTokenRemainingTime());
+      onToast?.("success", `欢迎 ${basic.virtual_id}，今日剩余 ${claim_limit.remaining} 次领取机会`);
+
+    } catch (err: any) {
+      // 用户取消不显示错误
+      if (err.message === "用户已取消") {
+        return;
+      }
+      // 解析后端错误码并使用 ErrorModal
+      const { code, message } = parseBackendError(err);
+      showErrorModal(code, message);
+      setQrError(message);
+      setQrStep("error");
+    }
+  };
+
+  // ===== 第四步：领取资源（新流程）=====
+  const handleClaimResource = async () => {
+    const currentToken = getPcToken();
+    if (!currentToken) {
+      setQrError("登录凭证已过期，请重新扫码");
+      setQrStep("error");
+      return;
+    }
+
+    if (!ticket) {
+      setQrError("任务票据无效");
+      setQrStep("error");
+      return;
+    }
+
+    // 检查是否还有剩余额度
+    if (remainingQuota <= 0) {
+      showErrorModal("DAILY_LIMIT_REACHED");
+      return;
+    }
+
+    // 设置冷却时间，防止重复点击
+    if (claimCooldown > 0) {
+      onToast?.("warning", `请等待 ${claimCooldown} 秒后再试`);
+      return;
+    }
+
+    setQrStep("claiming");
+    setClaimCooldown(10); // 10 秒冷却
+
+    try {
+      const response = await api.claimResourceWithToken(currentToken, {
+        ticket,
+        invite_code: inviteCode || undefined,
+      });
+
+      if (!response.success) {
+        // 处理特定的错误码
+        if (response.code === "RATE_LIMITED") {
+          throw new Error("操作太快了，请 10 秒后再试");
+        }
+        if (response.code === "DAILY_LIMIT_REACHED") {
+          throw new Error("今日额度已用完");
+        }
+        throw new Error(response.message || "领取资源失败");
+      }
+
+      // 保存后端返回的 message
+      setClaimMessage(response.message || "");
+
+      // 从 message 中提取用户的专属邀请码
+      const inviteCodeMatch = response.message?.match(/您的专属邀请码[：:]\s*([A-Z0-9]+)/i);
+      if (inviteCodeMatch) {
+        const extractedCode = inviteCodeMatch[1].toUpperCase();
+        setMyInviteCode(extractedCode);
+        localStorage.setItem('my_invite_code', extractedCode);
+      }
+
+      const accountsData = response.resource_payload || [];
+
+      if (accountsData.length === 0) {
+        setQrError("后端返回的账号数据为空");
         setQrStep("error");
         return;
       }
 
+      // 导入账号
       const importedAccounts: Account[] = [];
-
       for (const accountData of accountsData) {
         try {
-          const account = await api.addAccountByEmail(
-            accountData.account,
-            accountData.password
-          );
+          // 添加超时处理，避免卡住
+          const account = await Promise.race([
+            api.addAccountByEmail(
+              accountData.account,
+              accountData.password
+            ),
+            new Promise<never>((_, reject) => 
+              setTimeout(() => reject(new Error("导入账号超时")), 30000)
+            )
+          ]);
           importedAccounts.push(account);
         } catch (err: any) {
           console.error(`导入账号失败 ${accountData.account}:`, err);
+          onToast?.("error", `导入账号 ${accountData.account} 失败: ${err.message || "未知错误"}`);
         }
       }
 
       if (importedAccounts.length > 0) {
         setAddedAccounts(importedAccounts);
         setQrStep("success");
+        // 记录领取
+        recordClaim();
+        // 更新剩余次数
+        setTodayClaimed(prev => prev + 1);
+        setRemainingQuota(prev => Math.max(0, prev - 1));
+        setCanClaim(remainingQuota > 1);
+        
         importedAccounts.forEach(acc => onAccountAdded?.(acc));
         onToast?.("success", `成功导入 ${importedAccounts.length} 个账号`);
+        // 添加到历史记录
+        addHistory({
+          status: "success",
+          accounts: accountsData,
+        });
       } else {
         setManualAccounts(accountsData);
         setQrStep("manual");
         onToast?.("warning", "自动导入失败，请手动复制账号密码登录");
+        addHistory({
+          status: "manual",
+          accounts: accountsData,
+        });
       }
     } catch (err: any) {
-      // 用户取消不显示错误
-      if (err.message === "用户已取消") {
-        return;
-      }
-      setQrError(err.message || "验证失败");
+      const { code, message } = parseBackendError(err);
+      showErrorModal(code, message);
+      setQrError(message);
       setQrStep("error");
+      addHistory({
+        status: "failed",
+        accounts: [],
+        errorMessage: message,
+      });
     }
   };
 
@@ -453,9 +806,13 @@ export function AddAccountModal({
     setShowMoreDropdown(false);
     setLoginProgress(0);
     setLoginStatus("");
+    setBrowserEmail("");
+    setBrowserPassword("");
     stopProgressSimulation();
     resetQrState();
     void api.cancelBrowserLogin();
+    // 关闭时清除 PC Token（可选：如果希望保持登录状态可以注释掉）
+    clearPcToken();
     onClose();
   };
 
@@ -665,13 +1022,13 @@ export function AddAccountModal({
                   <line x1="12" y1="16" x2="12" y2="12" />
                   <line x1="12" y1="8" x2="12.01" y2="8" />
                 </svg>
-                <span>系统将自动打开浏览器窗口</span>
+                <span>系统将自动打开浏览器跳转到 Trae 登录页面</span>
               </div>
               <div className="info-item">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
                 </svg>
-                <span>登录信息将自动保存到本地</span>
+                <span>登录成功后账号将自动导入到本地</span>
               </div>
             </div>
 
@@ -685,7 +1042,7 @@ export function AddAccountModal({
                 onClick={handleBrowserAutoLogin} 
                 disabled={loading}
               >
-                {loading ? "等待登录..." : "打开登录页面"}
+                {loading ? "等待登录..." : "打开 Trae 登录页面"}
               </button>
             </div>
           </div>
@@ -825,54 +1182,310 @@ export function AddAccountModal({
           </div>
         ) : mode === "quick-register" ? (
           // ===== 扫码领号标签页内容 =====
-          <div className="trae-ide-mode">
+          <div className="trae-ide-mode" style={{ padding: '24px' }}>
             {/* 初始步骤 */}
             {qrStep === "initial" && (
-              <div className="step-content" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <div className="mode-description mode-description-compact">
-                  <div className="mode-icon-wrapper">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <rect x="3" y="3" width="7" height="7" rx="1" />
-                      <rect x="14" y="3" width="7" height="7" rx="1" />
-                      <rect x="3" y="14" width="7" height="7" rx="1" />
-                      <rect x="14" y="14" width="7" height="7" rx="1" />
-                    </svg>
-                  </div>
-                  <h3>扫码快速获取账号</h3>
-                  <p>测试阶段，每次获取1个，每人每天限量10个</p>
+              <div className="step-content" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                {/* 标题区域 */}
+                <div style={{ textAlign: 'center', marginBottom: '8px' }}>
+                  <h3 style={{
+                    fontSize: '22px',
+                    fontWeight: 700,
+                    color: 'var(--text-primary)',
+                    marginBottom: '8px',
+                    letterSpacing: '-0.5px'
+                  }}>
+                    扫码快速获取账号
+                  </h3>
+                  <p style={{
+                    fontSize: '14px',
+                    color: 'var(--text-secondary)',
+                    margin: 0
+                  }}>
+                    每次获取1个，每日基础额度2个
+                  </p>
                 </div>
 
-                {qrError && <div className="error-message" style={{ margin: '0 0 16px' }}>{qrError}</div>}
+                {/* 用户信息卡片 */}
+                <div style={{
+                  background: 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
+                  borderRadius: '16px',
+                  padding: '20px',
+                  border: '1px solid #e2e8f0',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+                }}>
+                  {userInfo ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                      {/* 头像 */}
+                      <div style={{
+                        width: '48px',
+                        height: '48px',
+                        borderRadius: '50%',
+                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'white',
+                        fontSize: '20px',
+                        fontWeight: 600,
+                        flexShrink: 0
+                      }}>
+                        {(userVirtualId || userInfo.openid).charAt(0).toUpperCase()}
+                      </div>
+                      
+                      {/* 用户信息 */}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ 
+                          fontSize: '15px', 
+                          fontWeight: 600, 
+                          color: 'var(--text-primary)',
+                          marginBottom: '4px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px'
+                        }}>
+                          {userVirtualId || `${userInfo.openid.substring(0, 12)}...`}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                          <span style={{
+                            fontSize: '13px',
+                            color: remainingQuota > 0 ? '#059669' : '#dc2626',
+                            fontWeight: 500,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                          }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M12 2v20M2 12h20"/>
+                            </svg>
+                            今日已领: {todayClaimed}/{baseLimit + bonusLimit}
+                          </span>
+                          {bonusLimit > 0 && (
+                            <span style={{
+                              fontSize: '11px',
+                              color: '#F97316',
+                              fontWeight: 600,
+                              background: '#fff7ed',
+                              padding: '2px 8px',
+                              borderRadius: '12px'
+                            }}>
+                              含邀请奖励
+                            </span>
+                          )}
+                          {remainingQuota === 0 && (
+                            <span style={{
+                              fontSize: '11px',
+                              color: '#dc2626',
+                              fontWeight: 600,
+                              background: '#fef2f2',
+                              padding: '2px 8px',
+                              borderRadius: '12px'
+                            }}>
+                              已达上限
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* 切换用户按钮 */}
+                      <button
+                        onClick={() => {
+                          clearUserInfo();
+                          setUserInfo(null);
+                          setTodayClaimed(0);
+                          setRemainingQuota(2);
+                          onToast?.("info", "已切换为新用户");
+                        }}
+                        style={{
+                          fontSize: '12px',
+                          padding: '8px 16px',
+                          border: '1px solid #cbd5e1',
+                          borderRadius: '8px',
+                          background: 'white',
+                          color: '#64748b',
+                          cursor: 'pointer',
+                          fontWeight: 500,
+                          transition: 'all 0.2s',
+                          whiteSpace: 'nowrap'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = '#94a3b8';
+                          e.currentTarget.style.color = '#475569';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = '#cbd5e1';
+                          e.currentTarget.style.color = '#64748b';
+                        }}
+                      >
+                        切换用户
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                      <div style={{
+                        width: '48px',
+                        height: '48px',
+                        borderRadius: '50%',
+                        background: '#f1f5f9',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#94a3b8'
+                      }}>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                          <circle cx="12" cy="7" r="4"/>
+                        </svg>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '15px', fontWeight: 600, color: '#64748b' }}>
+                          新用户
+                        </div>
+                        <div style={{ fontSize: '13px', color: '#94a3b8', marginTop: '2px' }}>
+                          扫码后将自动识别身份
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {qrError && (
+                  <div style={{
+                    background: '#fef2f2',
+                    border: '1px solid #fecaca',
+                    borderRadius: '12px',
+                    padding: '12px 16px',
+                    color: '#dc2626',
+                    fontSize: '14px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10"/>
+                      <line x1="12" y1="8" x2="12" y2="12"/>
+                      <line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    {qrError}
+                  </div>
+                )}
 
                 {/* 信息提示区域 */}
-                <div className="info-section" style={{ flex: 1, marginBottom: '20px' }}>
-                  <div className="info-item">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="10" />
-                      <line x1="12" y1="16" x2="12" y2="12" />
-                      <line x1="12" y1="8" x2="12.01" y2="8" />
-                    </svg>
-                    <span>每人每天限量10个账号</span>
+                <div style={{ 
+                  background: '#f8fafc', 
+                  borderRadius: '12px', 
+                  padding: '16px',
+                  border: '1px solid #e2e8f0'
+                }}>
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '12px',
+                    marginBottom: '12px'
+                  }}>
+                    <div style={{
+                      width: '32px',
+                      height: '32px',
+                      borderRadius: '8px',
+                      background: '#dbeafe',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#3b82f6',
+                      flexShrink: 0
+                    }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="12" y1="16" x2="12" y2="12" />
+                        <line x1="12" y1="8" x2="12.01" y2="8" />
+                      </svg>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: 600, color: '#1e293b', marginBottom: '2px' }}>
+                        每日限额
+                      </div>
+                      <div style={{ fontSize: '13px', color: '#64748b' }}>
+                        每日基础额度2个，邀请好友可获额外奖励
+                      </div>
+                    </div>
                   </div>
-                  <div className="info-item">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                    </svg>
-                    <span>扫码后观看视频即可获取</span>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                    <div style={{
+                      width: '32px',
+                      height: '32px',
+                      borderRadius: '8px',
+                      background: '#d1fae5',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#10b981',
+                      flexShrink: 0
+                    }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                      </svg>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '14px', fontWeight: 600, color: '#1e293b', marginBottom: '2px' }}>
+                        领取流程
+                      </div>
+                      <div style={{ fontSize: '13px', color: '#64748b' }}>
+                        扫码后在小程序内完成登录并观看视频后领取
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                <div className="modal-actions">
-                  <button type="button" onClick={handleClose} disabled={isQrLoading}>
-                    取消
+                {/* 操作按钮 */}
+                <div style={{ display: 'flex', gap: '12px', marginTop: 'auto' }}>
+                  <button 
+                    type="button" 
+                    onClick={() => setHistoryModalOpen(true)} 
+                    disabled={isQrLoading}
+                    style={{
+                      flex: 1,
+                      padding: '14px 20px',
+                      borderRadius: '12px',
+                      border: '1px solid #e2e8f0',
+                      background: 'white',
+                      color: '#64748b',
+                      fontSize: '14px',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    历史记录
                   </button>
                   <button
                     type="button"
-                    className="primary"
                     onClick={handleGetQrcode}
                     disabled={isQrLoading}
+                    style={{
+                      flex: 2,
+                      padding: '14px 20px',
+                      borderRadius: '12px',
+                      border: 'none',
+                      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                      color: 'white',
+                      fontSize: '14px',
+                      fontWeight: 600,
+                      cursor: isQrLoading ? 'not-allowed' : 'pointer',
+                      opacity: isQrLoading ? 0.7 : 1,
+                      transition: 'all 0.2s',
+                      boxShadow: '0 4px 14px rgba(102, 126, 234, 0.4)'
+                    }}
                   >
-                    {isQrLoading ? "获取中..." : "获取二维码"}
+                    {isQrLoading ? (
+                      <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
+                          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+                        </svg>
+                        获取中...
+                      </span>
+                    ) : (
+                      '获取二维码'
+                    )}
                   </button>
                 </div>
               </div>
@@ -895,36 +1508,6 @@ export function AddAccountModal({
                   ) : (
                     <div className="qrcode-placeholder">加载中...</div>
                   )}
-                </div>
-
-                {/* 邀请码输入 */}
-                <div style={{ marginBottom: '20px' }}>
-                  <input
-                    type="text"
-                    value={inviteCode}
-                    onChange={(e) => setInviteCode(e.target.value.toUpperCase().trim())}
-                    placeholder="邀请码（选填）"
-                    maxLength={6}
-                    style={{
-                      width: '100%',
-                      height: '38px',
-                      padding: '0 14px',
-                      fontSize: '14px',
-                      fontWeight: 500,
-                      textAlign: 'center',
-                      letterSpacing: '3px',
-                      border: '1px solid var(--border)',
-                      borderRadius: '6px',
-                      background: 'var(--bg-input)',
-                      color: 'var(--text-primary)',
-                      outline: 'none'
-                    }}
-                    onFocus={(e) => e.target.style.borderColor = 'var(--accent)'}
-                    onBlur={(e) => e.target.style.borderColor = 'var(--border)'}
-                  />
-                  <p style={{ fontSize: '11px', color: 'var(--accent)', marginTop: '6px', textAlign: 'center' }}>
-                    输入邀请码，首领账号直接暴击 5 倍！
-                  </p>
                 </div>
 
                 <div className="modal-actions">
@@ -963,6 +1546,232 @@ export function AddAccountModal({
               </div>
             )}
 
+            {/* 换取 Token 步骤 */}
+            {qrStep === "exchanging" && (
+              <div className="step-content">
+                <div className="waiting-section">
+                  <div className="loading-spinner large"></div>
+                  <h3>正在换取登录凭证...</h3>
+                  <p>验证成功，正在获取访问令牌</p>
+                </div>
+              </div>
+            )}
+
+            {/* 已验证步骤 - 显示用户信息和领取按钮 */}
+            {qrStep === "verified" && (
+              <div className="step-content">
+                <div className="success-section" style={{ padding: '20px 0' }}>
+                  <div className="success-icon" style={{ 
+                    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                    width: '56px',
+                    height: '56px'
+                  }}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" width="28" height="28">
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                      <circle cx="12" cy="7" r="4"/>
+                    </svg>
+                  </div>
+                  <h3>身份验证成功</h3>
+                  
+                  {/* 用户信息卡片 */}
+                  <div style={{
+                    background: 'var(--bg-secondary)',
+                    borderRadius: '12px',
+                    padding: '16px 20px',
+                    margin: '16px 0',
+                    border: '1px solid var(--border-color)',
+                    textAlign: 'left'
+                  }}>
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: '12px',
+                      paddingBottom: '12px',
+                      borderBottom: '1px solid var(--border-color)'
+                    }}>
+                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>用户编号</span>
+                      <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {userVirtualId || (userOpenid ? `${userOpenid.substring(0, 12)}...` : '未知')}
+                      </span>
+                    </div>
+
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: '12px',
+                      paddingBottom: '12px',
+                      borderBottom: '1px solid var(--border-color)'
+                    }}>
+                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>每日基础额度</span>
+                      <span style={{
+                        fontSize: '14px',
+                        fontWeight: 600,
+                        color: 'var(--text-primary)'
+                      }}>
+                        {baseLimit} 次
+                      </span>
+                    </div>
+
+                    {bonusLimit > 0 && (
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '12px',
+                        paddingBottom: '12px',
+                        borderBottom: '1px solid var(--border-color)'
+                      }}>
+                        <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>邀请奖励剩余</span>
+                        <span style={{
+                          fontSize: '14px',
+                          fontWeight: 600,
+                          color: '#F97316'
+                        }}>
+                          {bonusLimit} 次
+                        </span>
+                      </div>
+                    )}
+
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      marginBottom: '12px',
+                      paddingBottom: '12px',
+                      borderBottom: '1px solid var(--border-color)'
+                    }}>
+                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>今日已领取</span>
+                      <span style={{
+                        fontSize: '14px',
+                        fontWeight: 600,
+                        color: todayClaimed >= baseLimit ? '#ef4444' : '#10b981'
+                      }}>
+                        {todayClaimed} 次
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>当前剩余次数</span>
+                      <span style={{
+                        fontSize: '18px',
+                        fontWeight: 700,
+                        color: remainingQuota > 0 ? '#10b981' : '#ef4444'
+                      }}>
+                        {remainingQuota} 次
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* 邀请奖励额度提示 */}
+                  {isUsingBonusQuota && (
+                    <div style={{
+                      background: '#fff7ed',
+                      border: '1px solid #fdba74',
+                      borderRadius: '8px',
+                      padding: '10px 14px',
+                      marginBottom: '16px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2">
+                        <path d="M12 2v20M2 12h20"/>
+                      </svg>
+                      <span style={{ fontSize: '13px', color: '#c2410c' }}>
+                        基础额度已用完，当前正在消耗邀请奖励额度
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Token 有效期提示 */}
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px',
+                    fontSize: '12px',
+                    color: 'var(--text-muted)',
+                    marginBottom: '16px'
+                  }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10"/>
+                      <polyline points="12 6 12 12 16 14"/>
+                    </svg>
+                    登录有效期剩余: {formatCountdown(tokenCountdown)}
+                  </div>
+
+                  {/* 邀请码输入 */}
+                  {remainingQuota > 0 && (
+                    <div style={{ marginBottom: '20px' }}>
+                      <input
+                        type="text"
+                        value={inviteCode}
+                        onChange={(e) => setInviteCode(e.target.value.toUpperCase().trim())}
+                        placeholder="邀请码（选填）"
+                        maxLength={6}
+                        disabled={claimCooldown > 0}
+                        style={{
+                          width: '100%',
+                          height: '42px',
+                          padding: '0 16px',
+                          fontSize: '15px',
+                          fontWeight: 500,
+                          textAlign: 'center',
+                          letterSpacing: '4px',
+                          border: '1px solid var(--border)',
+                          borderRadius: '8px',
+                          background: claimCooldown > 0 ? 'var(--bg-disabled)' : 'var(--bg-input)',
+                          color: 'var(--text-primary)',
+                          outline: 'none',
+                          transition: 'all 0.2s'
+                        }}
+                        onFocus={(e) => { if (claimCooldown === 0) e.target.style.borderColor = 'var(--accent)'; }}
+                        onBlur={(e) => e.target.style.borderColor = 'var(--border)'}
+                      />
+                      <p style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px', textAlign: 'center' }}>
+                        输入邀请码可获得额外奖励
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="modal-actions">
+                  <button type="button" onClick={handleQrRetry}>
+                    重新扫码
+                  </button>
+                  {remainingQuota > 0 ? (
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={handleClaimResource}
+                      disabled={claimCooldown > 0}
+                      style={{ position: 'relative' }}
+                    >
+                      {claimCooldown > 0 ? (
+                        <span>等待 {claimCooldown}s</span>
+                      ) : (
+                        <span>立即领取账号</span>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled
+                      style={{ 
+                        background: '#ef4444', 
+                        opacity: 0.6,
+                        cursor: 'not-allowed'
+                      }}
+                    >
+                      今日额度已用完
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* 领取资源步骤 */}
             {qrStep === "claiming" && (
               <div className="step-content">
@@ -978,30 +1787,21 @@ export function AddAccountModal({
             {qrStep === "success" && (
               <div className="step-content">
                 <div className="success-section" style={{ position: 'relative' }}>
-                  {/* 暴击特效 */}
-                  {isCriticalHit && (
-                    <div style={{ position: 'absolute', top: '-20px', left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: '16px', pointerEvents: 'none' }}>
-                      <span style={{ fontSize: '20px', animation: 'bounce 1s ease-in-out infinite' }}>🎆</span>
-                      <span style={{ fontSize: '20px', animation: 'bounce 1s ease-in-out infinite 0.2s' }}>✨</span>
-                      <span style={{ fontSize: '20px', animation: 'bounce 1s ease-in-out infinite 0.4s' }}>🎉</span>
-                    </div>
-                  )}
-                  
                   <div className="success-icon">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" width="32" height="32">
                       <polyline points="20 6 9 17 4 12"/>
                     </svg>
                   </div>
-                  <h3>{isCriticalHit ? '恭喜暴击！' : '导入成功!'}</h3>
+                  <h3>导入成功!</h3>
                   <p>已成功导入 {addedAccounts.length} 个账号</p>
                   
                   {/* 后端返回的 message */}
                   {claimMessage && (
-                    <div style={{ 
-                      background: 'var(--bg-card)', 
-                      borderRadius: '8px', 
-                      padding: '12px', 
-                      margin: '12px 0', 
+                    <div style={{
+                      background: 'var(--bg-card)',
+                      borderRadius: '8px',
+                      padding: '12px',
+                      margin: '12px 0',
                       border: '1px solid var(--border)',
                       textAlign: 'left'
                     }}>
@@ -1014,6 +1814,47 @@ export function AddAccountModal({
                       <pre style={{ fontSize: '12px', color: 'var(--text-primary)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, fontFamily: 'inherit' }}>
                         {claimMessage}
                       </pre>
+                    </div>
+                  )}
+
+                  {/* 剩余次数提示 */}
+                  {remainingQuota > 0 ? (
+                    <div style={{
+                      background: '#f0fdf4',
+                      border: '1px solid #86efac',
+                      borderRadius: '8px',
+                      padding: '10px 14px',
+                      margin: '12px 0',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2">
+                        <polyline points="20 6 9 17 4 12"/>
+                      </svg>
+                      <span style={{ fontSize: '13px', color: '#15803d' }}>
+                        今日还可领取 {remainingQuota} 次
+                      </span>
+                    </div>
+                  ) : (
+                    <div style={{
+                      background: '#fef2f2',
+                      border: '1px solid #fecaca',
+                      borderRadius: '8px',
+                      padding: '10px 14px',
+                      margin: '12px 0',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="12" y1="8" x2="12" y2="12"/>
+                        <line x1="12" y1="16" x2="12.01" y2="16"/>
+                      </svg>
+                      <span style={{ fontSize: '13px', color: '#b91c1c' }}>
+                        今日次数已用完，请邀请好友获取更多额度
+                      </span>
                     </div>
                   )}
                   
@@ -1053,7 +1894,7 @@ export function AddAccountModal({
                         </button>
                       </div>
                       <p style={{ fontSize: '11px', color: '#F97316', marginTop: '6px' }}>
-                        分享给好友，双方均可获得 5 倍暴击奖励！
+                        分享给好友，双方均可获得额外奖励！
                       </p>
                     </div>
                   )}
@@ -1200,6 +2041,97 @@ export function AddAccountModal({
         isOpen={showWorkerGuide} 
         onClose={() => setShowWorkerGuide(false)} 
       />
+
+      {/* 错误弹窗 */}
+      <ErrorModal
+        isOpen={errorModalOpen}
+        errorCode={errorCode}
+        customMessage={errorMessage}
+        onClose={closeErrorModal}
+        onAction={() => {
+          closeErrorModal();
+          // 根据错误类型执行不同操作
+          if (errorCode === "DAILY_LIMIT_REACHED") {
+            handleClose();
+          } else if (errorCode === "RESOURCE_EMPTY" || errorCode === "TASK_EXPIRED") {
+            handleQrRetry();
+          }
+        }}
+      />
+
+      {/* 历史记录弹窗 */}
+      {historyModalOpen && (
+        <div className="modal-overlay" onClick={() => setHistoryModalOpen(false)}>
+          <div
+            className="modal-content history-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="quick-register-header">
+              <h2>历史记录</h2>
+              <button className="close-btn" onClick={() => setHistoryModalOpen(false)}>
+                ×
+              </button>
+            </div>
+            <div className="history-content">
+              {registerHistory.length === 0 ? (
+                <div className="history-empty">暂无历史记录</div>
+              ) : (
+                <div className="history-list">
+                  {registerHistory.map((item) => (
+                    <div key={item.id} className={`history-item ${item.status}`}>
+                      <div className="history-header">
+                        <span className={`history-status ${item.status}`}>
+                          {item.status === "success" ? "✓ 成功" : item.status === "manual" ? "⚠ 手动" : "✗ 失败"}
+                        </span>
+                        <span className="history-time">
+                          {new Date(item.timestamp).toLocaleString()}
+                        </span>
+                      </div>
+                      {item.accounts.length > 0 && (
+                        <div className="history-accounts">
+                          {item.accounts.map((acc, idx) => (
+                            <div key={idx} className="history-account">
+                              <div className="history-account-row">
+                                <span className="label">账号:</span>
+                                <code>{acc.account}</code>
+                                <button
+                                  className="copy-btn small"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(acc.account);
+                                    onToast?.("success", "邮箱已复制");
+                                  }}
+                                >
+                                  复制
+                                </button>
+                              </div>
+                              <div className="history-account-row">
+                                <span className="label">密码:</span>
+                                <code>{acc.password}</code>
+                                <button
+                                  className="copy-btn small"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(acc.password);
+                                    onToast?.("success", "密码已复制");
+                                  }}
+                                >
+                                  复制
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {item.errorMessage && (
+                        <div className="history-error">{item.errorMessage}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -7,157 +7,122 @@ interface WorkerSetupGuideProps {
 
 export function WorkerSetupGuide({ isOpen, onClose }: WorkerSetupGuideProps) {
   const [copied, setCopied] = useState(false);
+  const [showCode, setShowCode] = useState(false);
+  const [sqlCopied, setSqlCopied] = useState(false);
+  const [showSql, setShowSql] = useState(true);
 
   if (!isOpen) return null;
 
-  const workerCode = `// Cloudflare Worker 代码 - 临时邮箱服务
-// 使用 D1 数据库存储邮件，支持自动接收邮件和提取验证码
-
-export default {
+  const workerCode = `export default {
   async fetch(request, env) {
-    // 1. 设置跨域头（CORS），允许前端跨域调用这个接口
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
-
-    // 处理浏览器的 OPTIONS 预检请求
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
-
+    if (request.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
     const url = new URL(request.url);
 
-    // 初始化/升级数据库
-    await env.DB.prepare(\`CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT, source TEXT, subject TEXT, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)\`).run();
-    try { await env.DB.prepare(\`ALTER TABLE messages ADD COLUMN content TEXT\`).run(); } catch(e) {}
+    // 自动清理 5 分钟前数据
+    await env.DB.prepare(\`DELETE FROM messages WHERE created_at < datetime('now', '-5 minute')\`).run();
 
-    // 每次有请求时，自动清理超过1分钟的验证码/邮箱数据
-    await env.DB.prepare(\`DELETE FROM messages WHERE created_at < datetime('now', '-1 minute')\`).run();
-
-    // 提供专属 API 接口供前端调用
     if (url.pathname === "/api/get-code") {
-      
-      // 2. 验证前端传来的密钥 (参数名为 key)
       const providedKey = url.searchParams.get("key");
-      if (providedKey !== env.SECRET_KEY) {
-        return new Response(JSON.stringify({ error: "密钥错误或未提供" }), {
-          status: 403,
-          headers: { "Content-Type": "application/json;charset=UTF-8", ...corsHeaders }
-        });
-      }
-
-      // 获取前端指定的邮箱地址
       const targetEmail = url.searchParams.get("email");
-      if (!targetEmail) {
-        return new Response(JSON.stringify({ error: "缺少 email 参数，请提供需要查询的邮箱（例如: &email=test@xxx.com）" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json;charset=UTF-8", ...corsHeaders }
-        });
+
+      if (providedKey !== env.SECRET_KEY) {
+        return new Response(JSON.stringify({ error: "密钥错误" }), { status: 403, headers: corsHeaders });
       }
 
-      // 3. 读取数据库，针对指定邮箱查询，并转换为北京时间
-      // 只查询包含验证码的邮件（content中有6位数字）
-      const query = "SELECT content, datetime(created_at, '+8 hours') as local_time FROM messages WHERE address = ? AND content REGEXP '\\b\\d{6}\\b' ORDER BY id DESC LIMIT 1";
-      const result = await env.DB.prepare(query).bind(targetEmail.toLowerCase().trim()).first();
+      const result = await env.DB.prepare(
+        "SELECT source, subject, content, datetime(created_at, '+8 hours') as local_time FROM messages WHERE address = ? ORDER BY id DESC LIMIT 1"
+      ).bind(targetEmail?.toLowerCase().trim()).first();
       
       if (!result) {
-        return new Response(JSON.stringify({ error: "该邮箱目前没收到邮件，或者验证码已过期被删除（超过1分钟）" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json;charset=UTF-8", ...corsHeaders }
-        });
+        return new Response(JSON.stringify({ error: "未收到邮件" }), { status: 404, headers: corsHeaders });
       }
-      
-      const content = result.content || "";
-      const localTime = result.local_time;
-      
-      // 使用正则匹配提取 6 位验证码
-      const match = content.match(/\\b\\d{6}\\b/);
-      const code = match ? match[0] : "未找到验证码";
-      
-      // 4. 以 JSON 格式返回验证码和时间
-      return new Response(JSON.stringify({
-        email: targetEmail,
-        code: code,
-        time: \`\${localTime} (北京时间)\`
-      }), {
-        status: 200,
-        headers: { "Content-Type": "application/json;charset=UTF-8", ...corsHeaders }
-      });
-    }
 
-    return new Response("系统就绪，接口地址为 /api/get-code?key=你的密钥&email=目标邮箱", { headers: corsHeaders });
+      // 精准提取验证码：找 class="code-box" 的内容，或被 > < 包裹的数字
+      let code = "未找到";
+      const traeMatch = result.content.match(/class="code-box"[^>]*>\\s*(\\d+)\\s*<\\/span>/);
+      const universalMatch = result.content.match(/>\\s*(\\d{4,8})\\s*<\\//);
+      if (traeMatch) code = traeMatch[1];
+      else if (universalMatch) code = universalMatch[1];
+
+      // 检查是否是浏览器直接访问（根据 Accept 头）
+      const acceptHeader = request.headers.get('Accept') || '';
+      const isBrowser = acceptHeader.includes('text/html');
+
+      if (isBrowser) {
+        // 浏览器访问，返回简洁的 HTML 页面
+        const html = '<!DOCTYPE html>' +
+          '<html>' +
+          '<head>' +
+          '  <meta charset="UTF-8">' +
+          '  <title>验证码</title>' +
+          '  <style>' +
+          '    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }' +
+          '    .container { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); text-align: center; max-width: 400px; }' +
+          '    .label { color: #666; font-size: 14px; margin-bottom: 8px; }' +
+          '    .email { color: #333; font-size: 16px; margin-bottom: 24px; word-break: break-all; }' +
+          '    .code-label { color: #666; font-size: 14px; margin-bottom: 12px; }' +
+          '    .code { font-size: 48px; font-weight: bold; color: #667eea; letter-spacing: 8px; margin-bottom: 24px; }' +
+          '    .time { color: #999; font-size: 12px; }' +
+          '  </style>' +
+          '</head>' +
+          '<body>' +
+          '  <div class="container">' +
+          '    <div class="label">邮箱</div>' +
+          '    <div class="email">' + targetEmail + '</div>' +
+          '    <div class="code-label">验证码</div>' +
+          '    <div class="code">' + code + '</div>' +
+          '    <div class="time">' + result.local_time + ' (北京时间)</div>' +
+          '  </div>' +
+          '</body>' +
+          '</html>';
+        return new Response(html, { status: 200, headers: { "Content-Type": "text/html;charset=UTF-8", ...corsHeaders } });
+      } else {
+        // API 调用，返回 JSON
+        return new Response(JSON.stringify({
+          email: targetEmail,
+          subject: result.subject,
+          code: code,
+          time: result.local_time
+        }), { status: 200, headers: { "Content-Type": "application/json;charset=UTF-8", ...corsHeaders } });
+      }
+    }
+    return new Response("Service Running", { headers: corsHeaders });
   },
 
   async email(message, env) {
-    // 收到新邮件时，先清理一遍超过1分钟的历史过期数据
-    await env.DB.prepare(\`DELETE FROM messages WHERE created_at < datetime('now', '-1 minute')\`).run();
-
-    const raw = await new Response(message.raw).text();
-    const subject = message.headers.get("subject") || "";
-    
-    // 只处理验证码邮件（通过主题关键词过滤）
-    const isVerificationEmail = 
-      subject.toLowerCase().includes('verification') || 
-      subject.toLowerCase().includes('验证码') ||
-      subject.toLowerCase().includes('code') ||
-      raw.includes('Verification Code');
-    
-    if (!isVerificationEmail) {
-      // 非验证码邮件，直接忽略不存储
-      return;
-    }
-    
-    // 提取验证码 - 在原始邮件内容中查找 6 位数字
-    // 优先匹配 HTML 标签中的验证码，如 <span>123456</span>
-    let extractedCode = null;
-    
-    // 方法1: 匹配 HTML 标签中的 6 位数字
-    const htmlCodeMatch = raw.match(/>(\\d{6})</);
-    if (htmlCodeMatch) {
-      extractedCode = htmlCodeMatch[1];
-    }
-    
-    // 方法2: 如果方法1没找到，在邮件正文中查找独立的 6 位数字
-    if (!extractedCode) {
-      const bodyCodeMatch = raw.match(/\\b\\d{6}\\b/);
-      if (bodyCodeMatch) {
-        extractedCode = bodyCodeMatch[0];
-      }
-    }
-    
-    // 如果没找到验证码，打印邮件HTML内容以便调试
-    if (!extractedCode) {
-      console.log("未找到验证码，邮件HTML内容:");
-      console.log(raw);
-      return;
-    }
-    
-    // 改进的提取逻辑：找到第一个空行后的内容
-    const parts = raw.split(/\\r?\\n\\r?\\n/);
-    let body = parts.length > 1 ? parts.slice(1).join('\\n\\n') : raw;
-    
-    // 简单的解码和清洗
-    body = body.replace(/<[^>]+>/g, '') // 删掉 HTML 标签
-               .replace(/&nbsp;/g, ' ')
-               .replace(/=\\r?\\n/g, '')  // 处理 Quoted-Printable 换行
-               .trim();
-    
-    // 把验证码加到 body 开头，确保能被查询到
-    body = extractedCode + ' ' + body;
-
-    // 格式化目标邮箱名称（统一转为小写）
+    await env.DB.prepare(\`DELETE FROM messages WHERE created_at < datetime('now', '-5 minute')\`).run();
+    const rawContent = await new Response(message.raw).text();
+    const subject = message.headers.get("subject") || "无主题";
     const toAddress = (message.to || "").toLowerCase().trim();
 
-    try {
-      // 存入当前这封新邮件（每个邮箱的数据都单独存放）
-      await env.DB.prepare(
-        "INSERT INTO messages (address, source, subject, content) VALUES (?, ?, ?, ?)"
-      ).bind(toAddress, message.from, subject, body).run();
-    } catch (e) {
-      console.error("存入失败:", e.message);
+    let finalBody = "";
+    if (rawContent.includes("text/html")) {
+      const parts = rawContent.split("Content-Type: text/html");
+      const htmlPart = parts[1] ? parts[1].split("--")[0] : "";
+      if (htmlPart.includes("base64")) {
+        const base64Data = htmlPart.split("\\r\\n\\r\\n")[1] || htmlPart.split("\\n\\n")[1];
+        if (base64Data) {
+          try {
+            const decoded = atob(base64Data.replace(/[\\r\\n\\s]/g, ""));
+            finalBody = decodeURIComponent(escape(decoded));
+          } catch (e) { finalBody = atob(base64Data.replace(/[\\r\\n\\s]/g, "")); }
+        }
+      } else {
+        finalBody = htmlPart.split("\\r\\n\\r\\n")[1] || htmlPart;
+        finalBody = finalBody.replace(/=\\r?\\n/g, "").replace(/=([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16)));
+      }
+    } else {
+      finalBody = rawContent.substring(Math.max(0, rawContent.indexOf("\\r\\n\\r\\n")));
     }
+
+    try {
+      await env.DB.prepare("INSERT INTO messages (address, source, subject, content) VALUES (?, ?, ?, ?)").bind(toAddress, message.from, subject, finalBody).run();
+    } catch (e) { console.error(e.message); }
   }
 };`;
 
@@ -251,10 +216,10 @@ export default {
       lineHeight: 1.7,
       marginBottom: '20px',
     },
-    step: {
+    phase: {
       marginBottom: '28px',
     },
-    stepTitle: {
+    phaseTitle: {
       fontSize: '16px',
       fontWeight: 600,
       color: '#374151',
@@ -263,7 +228,7 @@ export default {
       alignItems: 'center',
       gap: '8px',
     },
-    stepNumber: {
+    phaseNumber: {
       width: '28px',
       height: '28px',
       borderRadius: '50%',
@@ -293,30 +258,29 @@ export default {
       fontSize: '13px',
       color: '#dc2626',
     },
-    table: {
-      width: '100%',
-      borderCollapse: 'collapse',
-      marginTop: '16px',
-      fontSize: '14px',
+    codeBlock: {
+      backgroundColor: '#1f2937',
+      color: '#e5e7eb',
+      padding: '16px',
+      borderRadius: '8px',
+      overflow: 'auto',
+      fontSize: '12px',
+      lineHeight: 1.5,
+      marginTop: '12px',
+      maxHeight: '300px',
     },
-    th: {
+    expandButton: {
       backgroundColor: '#f3f4f6',
-      padding: '12px 16px',
-      textAlign: 'left',
-      fontWeight: 600,
+      border: '1px solid #e5e7eb',
+      padding: '10px 16px',
+      borderRadius: '8px',
+      fontSize: '14px',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      marginTop: '12px',
       color: '#374151',
-      borderBottom: '2px solid #e5e7eb',
-    },
-    td: {
-      padding: '12px 16px',
-      borderBottom: '1px solid #e5e7eb',
-      color: '#4b5563',
-    },
-    codeBlockWrapper: {
-      position: 'relative',
-      marginTop: '16px',
-      borderRadius: '10px',
-      overflow: 'hidden',
     },
     copyButton: {
       position: 'absolute',
@@ -340,23 +304,6 @@ export default {
       borderColor: 'rgba(34, 197, 94, 0.4)',
       color: '#22c55e',
     },
-    pre: {
-      backgroundColor: '#1f2937',
-      color: '#e5e7eb',
-      padding: '20px',
-      borderRadius: '10px',
-      overflow: 'auto',
-      fontSize: '13px',
-      lineHeight: 1.6,
-      margin: 0,
-    },
-    ul: {
-      margin: '0 0 0 20px',
-      padding: 0,
-      color: '#4b5563',
-      fontSize: '14px',
-      lineHeight: 2,
-    },
     note: {
       backgroundColor: '#fef3c7',
       borderLeft: '4px solid #f59e0b',
@@ -365,6 +312,15 @@ export default {
       marginTop: '20px',
       fontSize: '14px',
       color: '#92400e',
+    },
+    important: {
+      backgroundColor: '#fee2e2',
+      borderLeft: '4px solid #dc2626',
+      padding: '12px 16px',
+      borderRadius: '8px',
+      marginTop: '12px',
+      fontSize: '14px',
+      color: '#991b1b',
     },
     actions: {
       padding: '20px 28px',
@@ -389,19 +345,24 @@ export default {
       textDecoration: 'none',
       fontWeight: 500,
     },
-    fileList: {
-      display: 'flex',
-      gap: '12px',
-      flexWrap: 'wrap',
-      marginTop: '12px',
+    testBox: {
+      backgroundColor: '#ecfdf5',
+      border: '1px solid #6ee7b7',
+      borderRadius: '8px',
+      padding: '16px',
+      marginTop: '16px',
     },
-    fileItem: {
-      backgroundColor: '#f3f4f6',
-      padding: '8px 16px',
-      borderRadius: '6px',
+    testTitle: {
+      fontSize: '15px',
+      fontWeight: 600,
+      color: '#065f46',
+      marginBottom: '8px',
+    },
+    testUrl: {
       fontSize: '13px',
-      color: '#374151',
+      color: '#047857',
       fontFamily: 'monospace',
+      wordBreak: 'break-all',
     },
   };
 
@@ -421,161 +382,287 @@ export default {
 
         {/* Content */}
         <div style={styles.content}>
-          {/* 功能说明 */}
+          {/* 第一阶段：准备域名 */}
           <div style={styles.section}>
             <h3 style={styles.sectionTitle}>
-              <span>📋</span> 功能说明
+              <span>🌐</span> 第一阶段：准备域名（Domain）
             </h3>
-            <p style={styles.sectionDesc}>
-              Cloudflare Worker 用于提供临时邮箱服务，支持快速注册 Trae 账号。
-              通过 Worker 可以自动创建临时邮箱、接收验证码，实现一键注册。
-            </p>
+            <div style={styles.phase}>
+              <div style={styles.phaseTitle}>
+                <span style={styles.phaseNumber}>1</span>
+                添加域名
+              </div>
+              <p style={styles.sectionDesc}>
+                将你的域名（如 <code style={styles.code}>hhxyyq.online</code>）托管到 Cloudflare。
+              </p>
+            </div>
+            <div style={styles.phase}>
+              <div style={styles.phaseTitle}>
+                <span style={styles.phaseNumber}>2</span>
+                激活电子邮件路由
+              </div>
+              <ol style={styles.ol}>
+                <li style={styles.li}>进入 Cloudflare 控制台，选择你的域名</li>
+                <li style={styles.li}>点击左侧菜单 <strong>"电子邮件 (Email)"</strong> → <strong>"电子邮件路由 (Email Routing)"</strong></li>
+                <li style={styles.li}>点击 <strong>"启用电子邮件路由"</strong></li>
+                <li style={styles.li}>
+                  <strong>关键步骤</strong>：在"DNS 设置"页签，点击 <strong>"自动添加记录"</strong>
+                  <div style={styles.important}>
+                    确保 MX 记录和 SPF 记录状态都变为"已激活"
+                  </div>
+                </li>
+              </ol>
+            </div>
           </div>
 
-          {/* 部署步骤 */}
+          {/* 第二阶段：创建数据库 */}
           <div style={styles.section}>
             <h3 style={styles.sectionTitle}>
-              <span>🚀</span> 部署步骤
+              <span>🗄️</span> 第二阶段：创建数据库（D1 Database）
             </h3>
-
-            {/* Step 1 */}
-            <div style={styles.step}>
-              <div style={styles.stepTitle}>
-                <span style={styles.stepNumber}>1</span>
-                创建 Cloudflare Worker
-              </div>
-              <ol style={styles.ol}>
-                <li style={styles.li}>登录 <a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" style={styles.link}>Cloudflare Dashboard</a></li>
-                <li style={styles.li}>点击左侧菜单 <strong>Workers & Pages</strong></li>
-                <li style={styles.li}>点击 <strong>创建服务</strong></li>
-                <li style={styles.li}>输入服务名称（如 <code style={styles.code}>trae-temp-mail</code>）</li>
-                <li style={styles.li}>点击 <strong>创建服务</strong></li>
-              </ol>
-            </div>
-
-            {/* Step 2 */}
-            <div style={styles.step}>
-              <div style={styles.stepTitle}>
-                <span style={styles.stepNumber}>2</span>
-                创建 D1 数据库
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '12px' }}>
-                D1 是 Cloudflare 提供的 SQLite 数据库，用于存储接收到的邮件内容和验证码。
-              </p>
-              <ol style={styles.ol}>
-                <li style={styles.li}>在 Workers & Pages 页面，点击 <strong>D1</strong></li>
-                <li style={styles.li}>点击 <strong>创建数据库</strong></li>
-                <li style={styles.li}>输入名称：<code style={styles.code}>trae-emails</code></li>
-                <li style={styles.li}>点击 <strong>创建</strong></li>
-              </ol>
-            </div>
-
-            {/* Step 3 */}
-            <div style={styles.step}>
-              <div style={styles.stepTitle}>
-                <span style={styles.stepNumber}>3</span>
-                绑定 D1 数据库到 Worker
-              </div>
-              <ol style={styles.ol}>
-                <li style={styles.li}>进入刚创建的 Worker 详情页</li>
-                <li style={styles.li}>点击 <strong>设置</strong> 标签</li>
-                <li style={styles.li}>点击 <strong>变量</strong> 选项卡</li>
-                <li style={styles.li}>在 <strong>D1 数据库绑定</strong> 部分，点击 <strong>添加绑定</strong></li>
-                <li style={styles.li}>变量名称填写：<code style={styles.code}>DB</code></li>
-                <li style={styles.li}>数据库选择刚才创建的 <code style={styles.code}>trae-emails</code></li>
-                <li style={styles.li}>点击 <strong>保存</strong></li>
-              </ol>
-            </div>
-
-            {/* Step 4 */}
-            <div style={styles.step}>
-              <div style={styles.stepTitle}>
-                <span style={styles.stepNumber}>4</span>
-                设置环境变量
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '12px' }}>
-                在 Worker 的 <strong>变量</strong> 页面，添加以下环境变量：
-              </p>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>变量名</th>
-                    <th style={styles.th}>值</th>
-                    <th style={styles.th}>说明</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td style={styles.td}><code style={styles.code}>SECRET_KEY</code></td>
-                    <td style={styles.td}>你的密钥</td>
-                    <td style={styles.td}>API 认证密钥，建议使用随机字符串</td>
-                  </tr>
-                  <tr>
-                    <td style={styles.td}><code style={styles.code}>EMAIL_DOMAIN</code></td>
-                    <td style={styles.td}>你的域名</td>
-                    <td style={styles.td}>临时邮箱域名，如 temp.example.com</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            {/* Step 5 */}
-            <div style={styles.step}>
-              <div style={styles.stepTitle}>
-                <span style={styles.stepNumber}>5</span>
-                部署 Worker 代码
-              </div>
-              <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '12px' }}>
-                将下面的代码复制到 Worker 的编辑器中，点击 <strong>保存并部署</strong>：
-              </p>
-              <div style={styles.codeBlockWrapper}>
-                <button
-                  style={{
-                    ...styles.copyButton,
-                    ...(copied ? styles.copyButtonCopied : {}),
-                  }}
-                  onClick={handleCopyCode}
-                >
-                  {copied ? (
-                    <>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <polyline points="20 6 9 17 4 12"/>
-                      </svg>
-                      已复制
-                    </>
-                  ) : (
-                    <>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                      </svg>
-                      复制代码
-                    </>
+            <ol style={styles.ol}>
+              <li style={styles.li}>在 Cloudflare 侧边栏点击 <strong>"存储和数据库"</strong> → <strong>"D1"</strong></li>
+              <li style={styles.li}>点击 <strong>"创建数据库"</strong> → <strong>"创建"</strong></li>
+              <li style={styles.li}>
+                名称：输入 <code style={styles.code}>trae-emails</code>（或者你喜欢的名字）
+              </li>
+              <li style={styles.li}>
+                创建成功后，点击进入该数据库，选择 <strong>"控制台 (Console)"</strong>
+              </li>
+              <li style={styles.li}>
+                初始化表结构：粘贴以下 SQL 代码并点击 <strong>"执行"</strong>：
+                <div style={{ marginTop: '12px', border: '1px solid #e5e7eb', borderRadius: '8px', overflow: 'hidden' }}>
+                  {/* SQL 代码头部 */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#f9fafb', borderBottom: showSql ? '1px solid #e5e7eb' : 'none' }}>
+                    <span style={{ fontSize: '13px', color: '#6b7280', fontWeight: 500 }}>SQL</span>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  address TEXT,
+  source TEXT,
+  subject TEXT,
+  content TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);`);
+                          setSqlCopied(true);
+                          setTimeout(() => setSqlCopied(false), 2000);
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '6px 12px',
+                          fontSize: '12px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          background: '#fff',
+                          color: sqlCopied ? '#059669' : '#374151',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        {sqlCopied ? (
+                          <>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <polyline points="20 6 9 17 4 12"/>
+                            </svg>
+                            已复制
+                          </>
+                        ) : (
+                          <>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                            复制
+                          </>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => setShowSql(!showSql)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          padding: '6px 12px',
+                          fontSize: '12px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          background: '#fff',
+                          color: '#374151',
+                          cursor: 'pointer',
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: showSql ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
+                          <polyline points="6 9 12 15 18 9"/>
+                        </svg>
+                        {showSql ? '收起' : '展开'}
+                      </button>
+                    </div>
+                  </div>
+                  {/* SQL 代码内容 */}
+                  {showSql && (
+                    <pre style={{ ...styles.codeBlock, margin: 0, borderRadius: 0 }}>{`CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  address TEXT,
+  source TEXT,
+  subject TEXT,
+  content TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);`}</pre>
                   )}
-                </button>
-                <pre style={styles.pre}>{workerCode}</pre>
-              </div>
-            </div>
+                </div>
+              </li>
+            </ol>
+          </div>
 
-            {/* Step 6 */}
-            <div style={styles.step}>
-              <div style={styles.stepTitle}>
-                <span style={styles.stepNumber}>6</span>
-                在应用中配置
+          {/* 第三阶段：部署 Worker 脚本 */}
+          <div style={styles.section}>
+            <h3 style={styles.sectionTitle}>
+              <span>⚡</span> 第三阶段：部署 Worker 脚本
+            </h3>
+            <ol style={styles.ol}>
+              <li style={styles.li}>在侧边栏点击 <strong>"Workers 和 Pages"</strong> → <strong>"创建"</strong> → <strong>"创建 Worker"</strong></li>
+              <li style={styles.li}>名称：输入 <code style={styles.code}>trae-temp-mail</code></li>
+              <li style={styles.li}>点击 <strong>"部署"</strong>，然后点击 <strong>"编辑代码"</strong></li>
+              <li style={styles.li}>
+                清空内容，粘贴以下经过优化的完整代码（支持 5 分钟清理、Base64 解码、精准提取）：
+                <button 
+                  style={styles.expandButton} 
+                  onClick={() => setShowCode(!showCode)}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    {showCode ? (
+                      <path d="M18 15l-6-6-6 6"/>
+                    ) : (
+                      <path d="M6 9l6 6 6-6"/>
+                    )}
+                  </svg>
+                  {showCode ? '收起代码' : '点击展开查看完整代码'}
+                </button>
+                {showCode && (
+                  <div style={{ position: 'relative', marginTop: '12px' }}>
+                    <button
+                      style={{
+                        ...styles.copyButton,
+                        ...(copied ? styles.copyButtonCopied : {}),
+                      }}
+                      onClick={handleCopyCode}
+                    >
+                      {copied ? (
+                        <>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <polyline points="20 6 9 17 4 12"/>
+                          </svg>
+                          已复制
+                        </>
+                      ) : (
+                        <>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                          </svg>
+                          复制代码
+                        </>
+                      )}
+                    </button>
+                    <pre style={styles.codeBlock}>{workerCode}</pre>
+                  </div>
+                )}
+              </li>
+              <li style={styles.li}>点击右上角 <strong>"部署"</strong></li>
+            </ol>
+          </div>
+
+          {/* 第四阶段：配置绑定 */}
+          <div style={styles.section}>
+            <h3 style={styles.sectionTitle}>
+              <span>🔗</span> 第四阶段：配置绑定（关键，决定能否运行）
+            </h3>
+            <p style={styles.sectionDesc}>
+              回到 Worker 的管理界面，点击 <strong>"设置 (Settings)"</strong> 选项卡。
+            </p>
+            
+            <div style={styles.phase}>
+              <div style={styles.phaseTitle}>
+                <span style={styles.phaseNumber}>1</span>
+                绑定数据库
               </div>
               <ol style={styles.ol}>
-                <li style={styles.li}>打开 Trae 账号管理应用</li>
-                <li style={styles.li}>点击 <strong>添加账号</strong> → <strong>快速注册</strong></li>
-                <li style={styles.li}>在 Cloudflare Worker 配置区域填写：
-                  <ul style={{ marginTop: '8px', color: '#6b7280' }}>
-                    <li><strong>Worker URL</strong>: <code style={styles.code}>https://your-worker.your-subdomain.workers.dev</code></li>
-                    <li><strong>Secret Key</strong>: 你在环境变量中设置的密钥</li>
-                    <li><strong>邮箱域名</strong>: 你在环境变量中设置的域名</li>
-                  </ul>
-                </li>
-                <li style={styles.li}>点击 <strong>保存配置</strong></li>
+                <li style={styles.li}>点击左侧 <strong>"变量 (Variables)"</strong> → 往下滚到 <strong>"D1 数据库绑定"</strong></li>
+                <li style={styles.li}>点击 <strong>"添加绑定"</strong></li>
+                <li style={styles.li}>变量名称：填写 <code style={styles.code}>DB</code>（必须大写）</li>
+                <li style={styles.li}>D1 数据库：选择你刚才创建的 <code style={styles.code}>trae-emails</code></li>
+                <li style={styles.li}>点击 <strong>"保存"</strong></li>
               </ol>
             </div>
+
+            <div style={styles.phase}>
+              <div style={styles.phaseTitle}>
+                <span style={styles.phaseNumber}>2</span>
+                设置密钥
+              </div>
+              <ol style={styles.ol}>
+                <li style={styles.li}>在同一个"变量"页面，点击顶部 <strong>"环境变量"</strong> 处的 <strong>"添加变量"</strong></li>
+                <li style={styles.li}>名称：<code style={styles.code}>SECRET_KEY</code></li>
+                <li style={styles.li}>值：设置你的密钥（如 <code style={styles.code}>qweasd123</code>）</li>
+                <li style={styles.li}>点击 <strong>"保存并部署"</strong></li>
+              </ol>
+            </div>
+
+            <div style={styles.phase}>
+              <div style={styles.phaseTitle}>
+                <span style={styles.phaseNumber}>3</span>
+                添加自定义域名
+              </div>
+              <ol style={styles.ol}>
+                <li style={styles.li}>点击左侧 <strong>"域和路由 (Domains & Routes)"</strong></li>
+                <li style={styles.li}>点击 <strong>"添加"</strong> → <strong>"自定义域"</strong></li>
+                <li style={styles.li}>输入 <code style={styles.code}>hhxyyq.online</code> 并确认</li>
+              </ol>
+            </div>
+          </div>
+
+          {/* 第五阶段：打通邮件通道 */}
+          <div style={styles.section}>
+            <h3 style={styles.sectionTitle}>
+              <span>📧</span> 第五阶段：打通邮件通道（最后一步）
+            </h3>
+            <ol style={styles.ol}>
+              <li style={styles.li}>回到域名控制台（<code style={styles.code}>hhxyyq.online</code>）</li>
+              <li style={styles.li}>点击 <strong>"电子邮件"</strong> → <strong>"电子邮件路由"</strong> → <strong>"路由规则"</strong></li>
+              <li style={styles.li}>找到 <strong>"Catch-all"</strong> (捕获所有)，点击 <strong>"编辑"</strong></li>
+              <li style={styles.li}>操作：选择 <strong>"发送到 Worker"</strong></li>
+              <li style={styles.li}>目标 Worker：选择 <code style={styles.code}>trae-temp-mail</code></li>
+              <li style={styles.li}>点击保存</li>
+            </ol>
+          </div>
+
+          {/* 如何测试 */}
+          <div style={styles.section}>
+            <h3 style={styles.sectionTitle}>
+              <span>🧪</span> 如何测试？
+            </h3>
+            <ol style={styles.ol}>
+              <li style={styles.li}>
+                <strong>发送邮件</strong>：用你的 QQ 邮箱给 <code style={styles.code}>test@hhxyyq.online</code> 发送一封信
+              </li>
+              <li style={styles.li}>
+                <strong>调用接口</strong>：在浏览器访问：
+                <div style={styles.testBox}>
+                  <div style={styles.testTitle}>测试 URL</div>
+                  <div style={styles.testUrl}>
+                    https://hhxyyq.online/api/get-code?key=你的密钥&email=test@hhxyyq.online
+                  </div>
+                </div>
+              </li>
+              <li style={styles.li}>
+                <strong>查看结果</strong>：你应该能看到 JSON 返回，其中 <code style={styles.code}>code</code> 是验证码，<code style={styles.code}>full_html</code> 是网页
+              </li>
+            </ol>
           </div>
 
           {/* 注意事项 */}
@@ -583,26 +670,11 @@ export default {
             <h3 style={styles.sectionTitle}>
               <span>⚠️</span> 注意事项
             </h3>
-            <ul style={styles.ul}>
-              <li style={styles.li}><strong>安全性</strong>: 请妥善保管 <code style={styles.code}>SECRET_KEY</code>，不要泄露给他人</li>
-              <li style={styles.li}><strong>配额</strong>: Cloudflare Worker 有每日请求限制，免费版为 100,000 次/天</li>
-              <li style={styles.li}><strong>数据保留</strong>: 临时邮箱数据会在 24 小时后自动删除</li>
-              <li style={styles.li}><strong>验证码接收</strong>: 需要配合邮件接收服务，将收到的验证码写入 KV</li>
+            <ul style={{ margin: '0 0 0 20px', padding: 0, color: '#4b5563', fontSize: '14px', lineHeight: 2 }}>
+              <li style={styles.li}><strong>安全性</strong>：请妥善保管 <code style={styles.code}>SECRET_KEY</code>，不要泄露给他人</li>
+              <li style={styles.li}><strong>数据保留</strong>：临时邮箱数据会在 5 分钟后自动删除</li>
+              <li style={styles.li}><strong>验证码提取</strong>：支持 Trae 的 <code style={styles.code}>code-box</code> 元素和通用数字匹配</li>
             </ul>
-          </div>
-
-          {/* 相关文件 */}
-          <div style={styles.section}>
-            <h3 style={styles.sectionTitle}>
-              <span>📁</span> 相关文件
-            </h3>
-            <p style={{ fontSize: '14px', color: '#6b7280', marginBottom: '12px' }}>
-              项目目录下已生成以下文件供参考：
-            </p>
-            <div style={styles.fileList}>
-              <span style={styles.fileItem}>CLOUDFLARE_WORKER_SETUP.md</span>
-              <span style={styles.fileItem}>worker.js</span>
-            </div>
           </div>
         </div>
 

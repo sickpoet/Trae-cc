@@ -16,12 +16,13 @@ use crate::{Account, AppState, TraeApiClient};
 /// 打开浏览器让用户手动登录，登录成功后自动提取token
 pub async fn browser_auto_login(
     app: AppHandle,
-    _email: String,
-    _password: String,
+    email: String,
+    password: String,
     state: &AppState,
 ) -> anyhow::Result<Account> {
     println!("[browser-auto-login] 开始浏览器登录流程");
-    println!("[browser-auto-login] 提示用户手动登录...");
+    println!("[browser-auto-login] 邮箱: {}", email);
+    println!("[browser-auto-login] 将自动填充账号密码...");
 
     // 创建取消通道
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
@@ -72,14 +73,104 @@ pub async fn browser_auto_login(
     let port = addr.port();
     println!("[browser-auto-login] 回调服务器启动在端口: {}", port);
 
-    // 准备 Token 拦截脚本
+    // 准备自动填充和 Token 拦截脚本
     let init_script = format!(
         r#"
         (function() {{
-            if (window.__tokenInterceptorInstalled) return;
-            window.__tokenInterceptorInstalled = true;
+            if (window.__traeAutoLoginInstalled) return;
+            window.__traeAutoLoginInstalled = true;
             
             var callbackUrl = 'http://127.0.0.1:{}/callback';
+            var email = '{}';
+            var password = '{}';
+            
+            // 自动填充账号密码函数
+            var autoFillLogin = function() {{
+                console.log('[AutoLogin] 尝试自动填充账号密码...');
+                
+                // 查找邮箱输入框（支持多种选择器）
+                var emailInput = document.querySelector('input[type="email"]') || 
+                                 document.querySelector('input[name="email"]') ||
+                                 document.querySelector('input[placeholder*="email" i]') ||
+                                 document.querySelector('input[placeholder*="邮箱" i]') ||
+                                 document.querySelector('input[id*="email" i]') ||
+                                 document.querySelector('input[class*="email" i]');
+                
+                // 查找密码输入框
+                var passwordInput = document.querySelector('input[type="password"]') ||
+                                    document.querySelector('input[name="password"]') ||
+                                    document.querySelector('input[placeholder*="password" i]') ||
+                                    document.querySelector('input[placeholder*="密码" i]');
+                
+                // 查找登录按钮
+                var loginButton = document.querySelector('button[type="submit"]') ||
+                                  document.querySelector('button:contains("Log in")') ||
+                                  document.querySelector('button:contains("登录")') ||
+                                  document.querySelector('button[class*="login" i]') ||
+                                  document.querySelector('button[id*="login" i]') ||
+                                  document.querySelector('button[class*="submit" i]');
+                
+                if (emailInput && passwordInput) {{
+                    console.log('[AutoLogin] 找到输入框，开始填充...');
+                    
+                    // 填充邮箱
+                    emailInput.value = email;
+                    emailInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    emailInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    emailInput.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                    
+                    // 填充密码
+                    passwordInput.value = password;
+                    passwordInput.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    passwordInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    passwordInput.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+                    
+                    console.log('[AutoLogin] 账号密码已填充');
+                    
+                    // 延迟点击登录按钮
+                    setTimeout(function() {{
+                        if (loginButton) {{
+                            console.log('[AutoLogin] 自动点击登录按钮');
+                            loginButton.click();
+                        }} else {{
+                            console.log('[AutoLogin] 未找到登录按钮，请手动点击');
+                        }}
+                    }}, 500);
+                    
+                    return true;
+                }} else {{
+                    console.log('[AutoLogin] 未找到输入框，email:', !!emailInput, 'password:', !!passwordInput);
+                    return false;
+                }}
+            }};
+            
+            // 页面加载完成后尝试自动填充
+            if (document.readyState === 'complete' || document.readyState === 'interactive') {{
+                setTimeout(autoFillLogin, 1000);
+            }} else {{
+                window.addEventListener('DOMContentLoaded', function() {{
+                    setTimeout(autoFillLogin, 1000);
+                }});
+            }}
+            
+            // 也监听页面变化（SPA路由切换）
+            var observer = new MutationObserver(function(mutations) {{
+                if (!window.__traeAutoFillAttempted) {{
+                    window.__traeAutoFillAttempted = true;
+                    setTimeout(function() {{
+                        autoFillLogin();
+                    }}, 500);
+                }}
+            }});
+            
+            observer.observe(document.body, {{
+                childList: true,
+                subtree: true
+            }});
+            
+            // Token 拦截器
+            if (window.__tokenInterceptorInstalled) return;
+            window.__tokenInterceptorInstalled = true;
             
             var sendToken = function(token, url) {{
                 if (!token || window.__trae_last_token) return;
@@ -232,7 +323,9 @@ pub async fn browser_auto_login(
             console.log('[TokenIntercept] Token 拦截器已安装，等待登录...');
         }})();
         "#,
-        port
+        port,
+        email.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\""),
+        password.replace("\\", "\\\\").replace("'", "\\'").replace("\"", "\\\"")
     );
 
     // 关闭已存在的窗口

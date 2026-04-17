@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex};
-use tauri::{AppHandle, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri::webview::PageLoadEvent;
 use tauri_plugin_updater::UpdaterExt;
 use uuid::Uuid;
@@ -328,12 +328,36 @@ async fn quick_register_with_custom_tempmail(
 
     let token_sender_route = token_sender.clone();
     let shutdown_sender_route = shutdown_sender.clone();
+    let app_handle_route = app.clone();
 
     let route = warp::path("callback")
         .and(warp::query::<HashMap<String, String>>())
         .map(move |query: HashMap<String, String>| {
             let token = query.get("token").cloned().unwrap_or_default();
             let url = query.get("url").cloned().unwrap_or_default();
+            let log = query.get("log").cloned().unwrap_or_default();
+            let status = query.get("status").cloned().unwrap_or_default();
+            let message = query.get("message").cloned().unwrap_or_default();
+
+            // 处理日志
+            if !log.is_empty() {
+                println!("[quick-register-js] {}", log);
+            }
+
+            // 处理状态通知
+            if !status.is_empty() && !message.is_empty() {
+                println!("[quick-register-status] {}: {}", status, message);
+                let app_handle = app_handle_route.clone();
+                let status_clone = status.clone();
+                let message_clone = message.clone();
+                tokio::spawn(async move {
+                    let _ = app_handle.emit("quick_register_notice", serde_json::json!({
+                        "id": status_clone,
+                        "message": message_clone,
+                        "status": status_clone
+                    }));
+                });
+            }
 
             if !token.is_empty() {
                 if let Some(tx) = token_sender_route.lock().unwrap().take() {
@@ -344,7 +368,7 @@ async fn quick_register_with_custom_tempmail(
                 }
                 warp::reply::html("已收到 Token，注册成功。".to_string())
             } else {
-                warp::reply::html("未收到 Token".to_string())
+                warp::reply::html("ok".to_string())
             }
         });
 
@@ -2174,9 +2198,47 @@ fn build_register_helper_script(port: u16) -> String {
     }
     if (btn) {
       btn.click();
+      // 发送注册按钮点击通知
+      sendPayload({ status: "register_clicked", message: "正在注册，请等待..." });
+      // 启动状态检测
+      startStatusDetection();
       return true;
     }
     return false;
+  };
+
+  // 检测注册状态（检测 go3958317564 类名的提示元素）
+  const startStatusDetection = () => {
+    let attempts = 0;
+    const maxAttempts = 30; // 最多检测 30 秒
+    let lastStatusText = "";
+    const checkInterval = setInterval(() => {
+      attempts++;
+      const statusDiv = document.querySelector('.go3958317564');
+      if (statusDiv) {
+        const statusText = (statusDiv.textContent || "").trim();
+        // 只处理新出现的提示文本
+        if (statusText && statusText !== lastStatusText) {
+          lastStatusText = statusText;
+          sendLog("检测到提示: " + statusText);
+          // 判断成功或失败
+          const successKeywords = ['success', 'succeed', 'successful', '成功', 'completed', 'done', 'welcome', '欢迎'];
+          const isSuccess = successKeywords.some(keyword => statusText.toLowerCase().includes(keyword));
+          if (isSuccess) {
+            sendPayload({ status: "register_success", message: "注册成功: " + statusText });
+            clearInterval(checkInterval);
+          } else {
+            // 非成功提示都视为错误/失败
+            sendPayload({ status: "register_failed", message: "注册失败: " + statusText });
+            clearInterval(checkInterval);
+          }
+        }
+      }
+      if (attempts >= maxAttempts) {
+        clearInterval(checkInterval);
+        sendPayload({ status: "register_timeout", message: "注册状态检测超时" });
+      }
+    }, 1000);
   };
 
   window.__traeAutoRegister = {
@@ -2378,6 +2440,10 @@ pub fn run() {
             quick_register_backend::quick_register_get_status,
             quick_register_backend::quick_register_claim_resource,
             quick_register_backend::quick_register_get_stats,
+            // 新流程：扫码即绑定，令牌即身份
+            quick_register_backend::exchange_pc_token,
+            quick_register_backend::get_user_info,
+            quick_register_backend::claim_resource_with_token,
         ])
         .setup(|app| {
             // 获取主窗口并显示

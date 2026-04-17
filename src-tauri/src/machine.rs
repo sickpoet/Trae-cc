@@ -979,7 +979,6 @@ pub fn backup_account_context(account_id: &str) -> Result<PathBuf> {
         fs::copy(&state_src, &state_dst)?;
     }
     
-    println!("[INFO] 已备份账号 {} 的上下文数据到: {:?}", account_id, backup_dir);
     Ok(backup_dir)
 }
 
@@ -1003,7 +1002,7 @@ pub fn restore_account_context(account_id: &str) -> Result<()> {
             fs::remove_dir_all(&workspace_dst)?;
         }
         copy_dir_all(&workspace_src, &workspace_dst)?;
-        println!("[INFO] 已恢复 workspaceStorage");
+
     }
     
     // 恢复 globalStorage，但需要保留当前的登录信息
@@ -1046,14 +1045,14 @@ pub fn restore_account_context(account_id: &str) -> Result<()> {
                         // 写回文件
                         if let Ok(new_content) = serde_json::to_string_pretty(&json) {
                             let _ = fs::write(&restored_storage_path, new_content);
-                            println!("[INFO] 已保留当前登录信息到恢复的 globalStorage");
+
                         }
                     }
                 }
             }
         }
         
-        println!("[INFO] 已恢复 globalStorage（保留当前登录信息）");
+
     }
     
     // 恢复 state.vscdb（聊天记录数据库）
@@ -1061,10 +1060,9 @@ pub fn restore_account_context(account_id: &str) -> Result<()> {
     let state_dst = get_trae_state_db_path()?;
     if state_src.exists() {
         fs::copy(&state_src, &state_dst)?;
-        println!("[INFO] 已恢复 state.vscdb");
+
     }
     
-    println!("[INFO] 已恢复账号 {} 的上下文数据", account_id);
     Ok(())
 }
 
@@ -1087,7 +1085,6 @@ pub fn delete_account_context_backup(account_id: &str) -> Result<()> {
     
     if backup_dir.exists() {
         fs::remove_dir_all(&backup_dir)?;
-        println!("[INFO] 已删除账号 {} 的上下文备份", account_id);
     }
     
     Ok(())
@@ -1103,7 +1100,7 @@ pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &
     let target_backup_dir = proj_dirs.data_dir().join("account_contexts").join(target_account_id);
     let target_workspace = target_backup_dir.join("workspaceStorage");
     
-    println!("[INFO] 开始将账号 {} 的对话记录合并到目标账号 {} 的备份中", current_account_id, target_account_id);
+
     
     // 确保目标备份目录存在
     fs::create_dir_all(&target_workspace)?;
@@ -1119,18 +1116,12 @@ pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &
     if workspace_src.exists() {
         match merge_workspace_storage(&workspace_src, &target_workspace) {
             Ok(count) => {
-                println!("[INFO] 已合并账号 {} 的 {} 个 workspace 对话记录", current_account_id, count);
                 total_merged += count;
             }
-            Err(e) => {
-                println!("[WARN] 合并账号 {} 的 workspace 对话记录失败: {}", current_account_id, e);
-            }
+            Err(_) => {}
         }
-    } else {
-        println!("[INFO] 当前账号 {} 没有 workspace 对话记录", current_account_id);
     }
     
-    println!("[INFO] 对话合并完成，共处理 {} 个记录", total_merged);
     Ok(())
 }
 
@@ -1171,7 +1162,6 @@ fn merge_workspace_storage(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
                 // 策略：重命名并复制，保留两个文件
                 if !dst_path.exists() {
                     fs::copy(&src_path, &dst_path)?;
-                    println!("[INFO] 已复制数据库文件: {}", file_name_str);
                     merged_count += 1;
                 } else {
                     // 目标已存在，创建副本
@@ -1186,7 +1176,6 @@ fn merge_workspace_storage(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
                             counter));
                     }
                     fs::copy(&src_path, &new_dst_path)?;
-                    println!("[INFO] 数据库文件已存在，创建副本: {}", new_dst_path.file_name().unwrap_or_default().to_string_lossy());
                     merged_count += 1;
                 }
             } else if file_name_str.ends_with(".json") {
@@ -1195,7 +1184,6 @@ fn merge_workspace_storage(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
                     merge_database_file(&src_path, &dst_path)?;
                 } else {
                     fs::copy(&src_path, &dst_path)?;
-                    println!("[INFO] 已复制 JSON 文件: {}", file_name_str);
                 }
                 merged_count += 1;
             } else {
@@ -1235,10 +1223,7 @@ fn merge_directory_contents(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
                 // SQLite 数据库文件是二进制格式，无法合并，直接复制（如果不存在）
                 if !dst_path.exists() {
                     fs::copy(&src_path, &dst_path)?;
-                    println!("[INFO] 已复制数据库文件: {}", file_name_str);
                     count += 1;
-                } else {
-                    println!("[INFO] 数据库文件已存在，跳过: {}", file_name_str);
                 }
             } else if file_name_str.ends_with(".json") {
                 // JSON 文件可以尝试合并
@@ -1246,7 +1231,6 @@ fn merge_directory_contents(src: &PathBuf, dst: &PathBuf) -> Result<usize> {
                     merge_database_file(&src_path, &dst_path)?;
                 } else {
                     fs::copy(&src_path, &dst_path)?;
-                    println!("[INFO] 已复制 JSON 文件: {}", file_name_str);
                 }
                 count += 1;
             } else if !dst_path.exists() {
@@ -1267,7 +1251,6 @@ fn merge_database_file(src: &PathBuf, dst: &PathBuf) -> Result<()> {
     // .vscdb 文件是 SQLite 二进制数据库，不能直接合并
     // 策略：保留目标文件，因为聊天记录已经在 workspaceStorage 中
     if file_name.ends_with(".vscdb") {
-        println!("[INFO] 跳过 SQLite 数据库文件合并（保留现有）: {}", file_name);
         return Ok(());
     }
     
@@ -1292,7 +1275,6 @@ fn merge_database_file(src: &PathBuf, dst: &PathBuf) -> Result<()> {
                         // 写回目标文件
                         let merged_content = serde_json::to_string_pretty(&dst_json)?;
                         fs::write(dst, merged_content)?;
-                        println!("[INFO] 已合并 JSON 文件: {}", file_name);
                         return Ok(());
                     }
                 }
@@ -1304,9 +1286,6 @@ fn merge_database_file(src: &PathBuf, dst: &PathBuf) -> Result<()> {
     // 其他情况：如果目标不存在则复制，否则保留目标
     if !dst.exists() {
         fs::copy(src, dst)?;
-        println!("[INFO] 已复制文件: {}", file_name);
-    } else {
-        println!("[INFO] 保留现有文件: {}", file_name);
     }
     
     Ok(())

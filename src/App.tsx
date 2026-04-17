@@ -13,6 +13,7 @@ import { ConfirmModal } from "./components/ConfirmModal";
 import { Stats } from "./pages/Stats";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
+import { Profile } from "./pages/Profile";
 
 import * as api from "./api";
 import type { Account, AccountBrief, AppSettings, UsageSummary } from "./types";
@@ -202,11 +203,11 @@ function App() {
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    listen<{ id?: string; message: string }>("quick_register_notice", (event) => {
+    listen<{ id?: string; message: string; status?: string }>("quick_register_notice", (event) => {
       if (quickRegisterShowWindow) {
         return;
       }
-      const { id, message } = event.payload || {};
+      const { id, message, status } = event.payload || {};
       if (!message) return;
       const key = id || message;
       const now = Date.now();
@@ -215,7 +216,20 @@ function App() {
         return;
       }
       quickRegisterNoticeRef.current.set(key, now);
-      addToast("success", message, 2500);
+
+      // 根据状态类型选择提示类型
+      let toastType: ToastMessage["type"] = "info";
+      if (status === "register_success") {
+        toastType = "success";
+      } else if (status === "register_failed") {
+        toastType = "error";
+      } else if (status === "register_timeout") {
+        toastType = "warning";
+      } else if (status === "register_clicked") {
+        toastType = "info";
+      }
+
+      addToast(toastType, message, 3000);
     })
       .then((fn) => {
         unlisten = fn;
@@ -507,20 +521,11 @@ function App() {
           
           // 2. 如果有当前活跃账号，先备份其上下文
           if (currentAccount && currentAccount.id !== accountId) {
-            console.log(`[SwitchAccount] 需要备份当前账号上下文`);
             try {
-              addToast("info", `正在备份当前账号的上下文...`, undefined, `backup-${currentAccount.id}`);
-              console.log(`[SwitchAccount] 开始备份账号 ${currentAccount.id}...`);
               await api.backupAccountContext(currentAccount.id);
-              console.log(`[SwitchAccount] 已备份账号 ${currentAccount.id} 的上下文`);
-              addToast("success", `已备份当前账号上下文`);
-            } catch (backupErr: any) {
-              console.error(`[SwitchAccount] 备份当前账号上下文失败:`, backupErr);
-              addToast("warning", `备份当前账号上下文失败: ${backupErr.message}`);
+            } catch {
               // 备份失败不阻止切换
             }
-          } else {
-            console.log(`[SwitchAccount] 无需备份: currentAccount=${currentAccount?.id}, sameAccount=${currentAccount?.id === accountId}`);
           }
           
           // 3. 执行账号切换
@@ -529,22 +534,12 @@ function App() {
           console.log(`[SwitchAccount] 账号切换完成`);
 
           // 4. 恢复新账号的上下文（如果有备份）
-          console.log(`[SwitchAccount] 检查新账号 ${accountId} 是否有备份...`);
           try {
             const hasBackup = await api.hasAccountContextBackup(accountId);
-            console.log(`[SwitchAccount] 新账号 ${accountId} 是否有备份:`, hasBackup);
             if (hasBackup) {
-              addToast("info", `正在恢复账号的上下文...`, undefined, `restore-${accountId}`);
-              console.log(`[SwitchAccount] 开始恢复账号 ${accountId} 的上下文...`);
               await api.restoreAccountContext(accountId);
-              console.log(`[SwitchAccount] 已恢复账号 ${accountId} 的上下文`);
-              addToast("success", `已恢复账号上下文`);
-            } else {
-              console.log(`[SwitchAccount] 新账号 ${accountId} 没有备份，跳过恢复`);
             }
-          } catch (restoreErr: any) {
-            console.error(`[SwitchAccount] 恢复新账号上下文失败:`, restoreErr);
-            addToast("warning", `恢复新账号上下文失败: ${restoreErr.message}`);
+          } catch {
             // 恢复失败不阻止切换
           }
           
@@ -1146,6 +1141,8 @@ function App() {
             </main>
           </>
         )}
+
+        {currentPage === "profile" && <Profile onToast={addToast} />}
 
         {currentPage === "settings" && (
           <Settings

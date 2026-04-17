@@ -12,6 +12,60 @@ export function checkApiConfig(): boolean {
   return !!(QUICK_REGISTER_API_BASE && APP_ID && APP_SECRET);
 }
 
+// ============ PC Token 相关类型定义 ============
+
+// 换取 PC Token 响应
+export interface PcTokenResponse {
+  success: boolean;
+  pc_bind_token?: string;
+  message?: string;
+  code?: string;
+}
+
+// 用户信息响应
+export interface UserInfoResponse {
+  success: boolean;
+  data: {
+    basic: {
+      openid: string;
+      virtual_id: string;
+      qq_id: string | null;
+      is_vip: boolean;
+      created_at: string;
+    };
+    claim_limit: {
+      base_limit: number;
+      bonus_limit: number;
+      total_limit: number;
+      current_usage: number;
+      remaining: number;
+    };
+    invitation: {
+      invite_code: string | null;
+      total_invited: number;
+      is_invited: boolean;
+    };
+  };
+  message?: string;
+}
+
+// 领取资源请求（新流程）
+export interface ClaimResourceRequest {
+  ticket: string;
+  invite_code?: string;
+}
+
+// 领取资源响应（新流程）
+export interface ClaimResourceNewResponse {
+  success: boolean;
+  resource_payload: {
+    account: string;
+    password: string;
+  }[];
+  message: string;
+  code?: string;
+}
+
 // 任务创建响应
 export interface CreateTaskResponse {
   success: boolean;
@@ -20,6 +74,12 @@ export interface CreateTaskResponse {
   is_vip: boolean;
   url_scheme: string;
   message: string;
+}
+
+// 带 openid 创建任务的请求参数
+export interface CreateTaskWithOpenidRequest {
+  platformId: string;
+  openid?: string;  // 可选：已存储的用户 openid
 }
 
 // 任务状态
@@ -39,6 +99,9 @@ export interface TaskStatusResponse {
   }[] | null;
   access_token?: string | null;
   platform?: string;
+  openid?: string;           // 用户微信 openid（验证成功后返回）
+  daily_claimed?: number;    // 该用户今日已领取次数
+  daily_limit?: number;      // 每日限额（通常是2）
 }
 
 // 领取资源响应 - 根据后端实际返回格式
@@ -374,6 +437,21 @@ export async function createQuickRegisterTask(platformId: string): Promise<Creat
 }
 
 /**
+ * 创建快速注册任务（带 openid，用于识别老用户）
+ * @param params 包含 platformId 和可选的 openid
+ * @returns 包含ticket和二维码链接的响应
+ */
+export async function createQuickRegisterTaskWithOpenid(
+  params: CreateTaskWithOpenidRequest
+): Promise<CreateTaskResponse> {
+  // 通过 Tauri 命令调用 Rust 后端，支持传递 openid
+  return invoke("quick_register_create_task", {
+    platformId: params.platformId,
+    openid: params.openid,
+  });
+}
+
+/**
  * 查询任务状态
  * @param ticket 任务票据
  * @returns 任务状态响应
@@ -503,4 +581,46 @@ export function pollTaskVerification(
   };
 
   return { promise, cancel };
+}
+
+// ============ 新流程 API：扫码即绑定，令牌即身份 ============
+
+/**
+ * 换取 PC 绑定令牌
+ * @param ticket 扫码成功的凭证
+ * @returns PC Token 响应
+ */
+export async function exchangePcToken(ticket: string): Promise<PcTokenResponse> {
+  return invoke("exchange_pc_token", { ticket });
+}
+
+/**
+ * 获取当前用户信息（需要 PC Token）
+ * @param pcToken PC 绑定令牌
+ * @returns 用户信息响应
+ */
+export async function getUserInfo(pcToken: string): Promise<UserInfoResponse> {
+  return invoke("get_user_info", { pcToken });
+}
+
+/**
+ * 领取资源（新流程，需要 PC Token）
+ * @param pcToken PC 绑定令牌
+ * @param params 领取参数
+ * @returns 领取结果
+ */
+export async function claimResourceWithToken(
+  pcToken: string,
+  params: ClaimResourceRequest
+): Promise<ClaimResourceNewResponse> {
+  return invoke("claim_resource_with_token", { pcToken, ...params });
+}
+
+/**
+ * 获取我的邀请码
+ * @param pcToken PC 绑定令牌
+ * @returns 邀请码信息
+ */
+export async function getMyInviteCode(pcToken: string): Promise<{ success: boolean; data: { invite_code: string }; message?: string }> {
+  return invoke("get_my_invite_code", { pcToken });
 }
