@@ -350,7 +350,23 @@ pub async fn browser_auto_login(
 
     println!("[browser-auto-login] 等待用户登录...");
 
-    // 等待 token 或取消信号
+    // 创建窗口关闭监听通道
+    let (window_close_tx, mut window_close_rx) = oneshot::channel::<()>();
+    let window_close_tx = Arc::new(StdMutex::new(Some(window_close_tx)));
+    
+    // 监听窗口关闭事件
+    let webview_clone = webview.clone();
+    let window_close_tx_clone = window_close_tx.clone();
+    webview.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { .. } = event {
+            println!("[browser-auto-login] 浏览器窗口被用户关闭");
+            if let Some(tx) = window_close_tx_clone.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+        }
+    });
+
+    // 等待 token、取消信号或窗口关闭
     let result = tokio::select! {
         res = token_rx => {
             match res {
@@ -365,6 +381,10 @@ pub async fn browser_auto_login(
             println!("[browser-auto-login] 登录被取消");
             let _ = webview.destroy();
             Err(anyhow!("登录已取消"))
+        }
+        _ = &mut window_close_rx => {
+            println!("[browser-auto-login] 浏览器窗口已关闭");
+            Err(anyhow!("浏览器窗口已关闭"))
         }
     };
 

@@ -112,16 +112,16 @@ export function AddAccountModal({
 
   // 用户信息
   const [, setUserInfo] = useState<StoredUserInfo | null>(null);
-  const [todayClaimed, setTodayClaimed] = useState(0);
+  const [, setTodayClaimed] = useState(0);
   const [remainingQuota, setRemainingQuota] = useState(0);
-  const [inviteCount, setInviteCount] = useState(0);                    // 邀请人数
+  const [, setInviteCount] = useState(0);                    // 邀请人数
 
   // ===== 新流程状态 =====
   const [, setPcToken] = useState<string | null>(null);                  // PC 绑定令牌
   const [, setUserOpenid] = useState<string | null>(null);               // 当前用户 OpenID
-  const [userVirtualId, setUserVirtualId] = useState<string | null>(null); // 当前用户 Virtual ID（显示用）
-  const [baseLimit, setBaseLimit] = useState(2);                         // 基础每日限额
-  const [bonusLimit, setBonusLimit] = useState(0);                       // 邀请奖励剩余额度
+  const [, setUserVirtualId] = useState<string | null>(null); // 当前用户 Virtual ID（显示用）
+  const [, setBaseLimit] = useState(2);                         // 基础每日限额
+  const [, setBonusLimit] = useState(0);                       // 邀请奖励剩余额度
   const [, setTokenCountdown] = useState(600);                           // Token 倒计时
   const [, setCanClaim] = useState(false);                               // 是否可以领取
   const [claimCooldown, setClaimCooldown] = useState(0);                 // 领取按钮冷却时间
@@ -417,11 +417,6 @@ export function AddAccountModal({
 
   // 浏览器自动登录
   const handleBrowserAutoLogin = async () => {
-    if (!browserEmail || !browserPassword) {
-      setError("请输入邮箱和密码");
-      return;
-    }
-
     setLoading(true);
     setError("");
     setLoginProgress(10);
@@ -445,6 +440,13 @@ export function AddAccountModal({
         onToast?.("success", `登录成功，已导入账号: ${account.email}`);
       }, 800);
     } catch (err: any) {
+      // 用户关闭浏览器窗口，不显示错误
+      if (err.message === "浏览器窗口已关闭" || err.message === "登录已取消") {
+        setLoading(false);
+        setLoginProgress(0);
+        setLoginStatus("");
+        return;
+      }
       setError(err.message || "自动登录失败");
       setLoading(false);
       setLoginProgress(0);
@@ -814,11 +816,11 @@ export function AddAccountModal({
         <div className="add-account-header">
           <h2>添加账号</h2>
           
-          {/* 剩余账号数量 - 一直显示在头部 */}
+          {/* 剩余账号数量 - 一直显示在头部，只显示最后一位 */}
           <div className="available-count-header">
             <span>剩余账号: </span>
             <span className={`count ${availableCount !== null && availableCount > 0 ? 'has-count' : ''}`}>
-              {availableCount !== null ? availableCount : "--"}
+              {availableCount !== null ? (availableCount.toString().slice(-1) === '0' ? '1' : availableCount.toString().slice(-1)) : "--"}
             </span>
             <button
               onClick={() => fetchStats()}
