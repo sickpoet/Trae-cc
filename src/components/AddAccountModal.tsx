@@ -11,7 +11,6 @@ import {
   getCurrentPlatformId,
   initOrUpdateUserInfo,
   recordClaim,
-  clearUserInfo,
   getTodayClaimCount,
   getRemainingClaims,
   savePcToken,
@@ -37,7 +36,6 @@ interface AddAccountModalProps {
 }
 
 type AddMode = "browser" | "register" | "quick-register" | "more";
-type MoreSubMode = "trae-ide" | "import-export" | null;
 // 新流程步骤：扫码 -> 换取 Token -> 显示用户信息 -> 领取
 type QuickRegisterStep = 
   | "initial"      // 初始状态，检查是否有有效 Token
@@ -78,18 +76,12 @@ export function AddAccountModal({
   onToast,
   onAccountAdded,
   quickRegisterShowWindow = true,
-  onImportAccounts,
-  onExportAccounts,
-  canExport = false,
   settings,
   onSettingsChange,
 }: AddAccountModalProps) {
-  const [mode, setMode] = useState<AddMode>("browser");
-  const [moreSubMode, setMoreSubMode] = useState<MoreSubMode>(null);
-  const [showMoreDropdown, setShowMoreDropdown] = useState(false);
+  const [mode, setMode] = useState<AddMode>("quick-register");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const dropdownRef = useRef<HTMLDivElement>(null);
   
   // Worker 配置教程弹窗状态
   const [showWorkerGuide, setShowWorkerGuide] = useState(false);
@@ -119,20 +111,21 @@ export function AddAccountModal({
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   // 用户信息
-  const [userInfo, setUserInfo] = useState<StoredUserInfo | null>(null);
+  const [, setUserInfo] = useState<StoredUserInfo | null>(null);
   const [todayClaimed, setTodayClaimed] = useState(0);
   const [remainingQuota, setRemainingQuota] = useState(0);
+  const [inviteCount, setInviteCount] = useState(0);                    // 邀请人数
 
   // ===== 新流程状态 =====
   const [, setPcToken] = useState<string | null>(null);                  // PC 绑定令牌
-  const [userOpenid, setUserOpenid] = useState<string | null>(null);     // 当前用户 OpenID
+  const [, setUserOpenid] = useState<string | null>(null);               // 当前用户 OpenID
   const [userVirtualId, setUserVirtualId] = useState<string | null>(null); // 当前用户 Virtual ID（显示用）
   const [baseLimit, setBaseLimit] = useState(2);                         // 基础每日限额
   const [bonusLimit, setBonusLimit] = useState(0);                       // 邀请奖励剩余额度
-  const [tokenCountdown, setTokenCountdown] = useState(600);             // Token 倒计时
+  const [, setTokenCountdown] = useState(600);                           // Token 倒计时
   const [, setCanClaim] = useState(false);                               // 是否可以领取
   const [claimCooldown, setClaimCooldown] = useState(0);                 // 领取按钮冷却时间
-  const [isUsingBonusQuota, setIsUsingBonusQuota] = useState(false);     // 是否正在使用邀请奖励额度
+  const [, setIsUsingBonusQuota] = useState(false);                      // 是否正在使用邀请奖励额度
 
   // 历史记录弹窗状态
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
@@ -145,7 +138,7 @@ export function AddAccountModal({
   
   // ===== 邀请码相关状态 =====
   const [inviteCode, setInviteCode] = useState("");
-  const [claimMessage, setClaimMessage] = useState("");
+  const [, setClaimMessage] = useState("");
   const [myInviteCode, setMyInviteCode] = useState("");
   
   // ===== 轮询取消函数 =====
@@ -163,17 +156,6 @@ export function AddAccountModal({
         cancelPollingRef.current = null;
       }
     };
-  }, []);
-
-  // 点击外部关闭下拉菜单
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setShowMoreDropdown(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
   // 打开模态框时自动获取剩余账号数量
@@ -206,7 +188,7 @@ export function AddAccountModal({
           try {
             const userResponse = await api.getUserInfo(existingToken);
             if (userResponse.success) {
-              const { basic, claim_limit } = userResponse.data;
+              const { basic, claim_limit, invitation } = userResponse.data;
 
               // 更新用户信息
               setUserOpenid(basic.openid);
@@ -215,6 +197,7 @@ export function AddAccountModal({
               setRemainingQuota(claim_limit.remaining);
               setBaseLimit(claim_limit.base_limit);
               setBonusLimit(claim_limit.bonus_limit);
+              setInviteCount(invitation?.total_invited || 0);
               setCanClaim(claim_limit.remaining > 0);
               setIsUsingBonusQuota(claim_limit.current_usage >= claim_limit.base_limit && claim_limit.remaining > 0);
 
@@ -609,7 +592,7 @@ export function AddAccountModal({
       }
 
       // 从嵌套数据结构中提取用户信息
-      const { basic, claim_limit } = userResponse.data;
+      const { basic, claim_limit, invitation } = userResponse.data;
       
       // 保存用户信息
       setUserOpenid(basic.openid);
@@ -618,6 +601,7 @@ export function AddAccountModal({
       setRemainingQuota(claim_limit.remaining);
       setBaseLimit(claim_limit.base_limit);
       setBonusLimit(claim_limit.bonus_limit);
+      setInviteCount(invitation?.total_invited || 0);
       setCanClaim(claim_limit.remaining > 0);
 
       // 判断是否正在使用邀请奖励额度（基础额度已用完但还有剩余次数）
@@ -631,10 +615,13 @@ export function AddAccountModal({
       // 保存 virtualId 到本地存储
       updateUserVirtualId(basic.virtual_id);
 
-      // 进入已验证状态，等待用户点击领取
-      setQrStep("verified");
-      setTokenCountdown(getPcTokenRemainingTime());
-      onToast?.("success", `欢迎 ${basic.virtual_id}，今日剩余 ${claim_limit.remaining} 次领取机会`);
+      // 验证成功，自动领取账号（静默处理）
+      onToast?.("success", "身份验证成功，正在自动领取账号...");
+      
+      // 延迟一下让用户看到提示，然后自动领取
+      setTimeout(() => {
+        void autoClaimResource();
+      }, 1500);
 
     } catch (err: any) {
       // 用户取消不显示错误
@@ -649,8 +636,8 @@ export function AddAccountModal({
     }
   };
 
-  // ===== 第四步：领取资源（新流程）=====
-  const handleClaimResource = async () => {
+  // ===== 第四步：自动领取资源（验证成功后自动调用）=====
+  const autoClaimResource = async () => {
     const currentToken = getPcToken();
     if (!currentToken) {
       setQrError("登录凭证已过期，请重新扫码");
@@ -667,12 +654,6 @@ export function AddAccountModal({
     // 检查是否还有剩余额度
     if (remainingQuota <= 0) {
       showErrorModal("DAILY_LIMIT_REACHED");
-      return;
-    }
-
-    // 设置冷却时间，防止重复点击
-    if (claimCooldown > 0) {
-      onToast?.("warning", `请等待 ${claimCooldown} 秒后再试`);
       return;
     }
 
@@ -801,9 +782,7 @@ export function AddAccountModal({
 
   const handleClose = () => {
     setError("");
-    setMode("browser");
-    setMoreSubMode(null);
-    setShowMoreDropdown(false);
+    setMode("quick-register");
     setLoginProgress(0);
     setLoginStatus("");
     setBrowserEmail("");
@@ -814,22 +793,6 @@ export function AddAccountModal({
     // 关闭时清除 PC Token（可选：如果希望保持登录状态可以注释掉）
     clearPcToken();
     onClose();
-  };
-
-  const handleImport = () => {
-    onImportAccounts?.();
-    handleClose();
-  };
-
-  const handleExport = () => {
-    onExportAccounts?.();
-    handleClose();
-  };
-
-  const handleMoreSelect = (subMode: MoreSubMode) => {
-    setMoreSubMode(subMode);
-    setMode("more");
-    setShowMoreDropdown(false);
   };
 
   const isConfigComplete = settings?.custom_tempmail_config?.api_url && 
@@ -870,83 +833,55 @@ export function AddAccountModal({
             </button>
           </div>
           
-          {/* 更多下拉菜单 */}
-          <div className="more-dropdown-container header-dropdown" ref={dropdownRef}>
-            <button
-              className="quick-register-btn"
-              onClick={() => setShowMoreDropdown(!showMoreDropdown)}
-              disabled={loading || isQrLoading}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="1" />
-                <circle cx="19" cy="12" r="1" />
-                <circle cx="5" cy="12" r="1" />
-              </svg>
-              更多
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{marginLeft: '4px'}}>
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-            </button>
-            
-            {showMoreDropdown && (
-              <div className="more-dropdown-menu dropdown-right">
-                <button
-                  className={`dropdown-item ${moreSubMode === "trae-ide" ? "active" : ""}`}
-                  onClick={() => handleMoreSelect("trae-ide")}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
-                    <line x1="12" y1="22.08" x2="12" y2="12" />
-                  </svg>
-                  从 Trae 读取
-                </button>
-                <button
-                  className="dropdown-item"
-                  onClick={() => {
-                    setShowMoreDropdown(false);
-                    handleImport();
-                  }}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
-                  导入账号
-                </button>
-                <button
-                  className="dropdown-item"
-                  onClick={() => {
-                    setShowMoreDropdown(false);
-                    handleExport();
-                  }}
-                  disabled={!canExport}
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
-                  </svg>
-                  导出账号
-                </button>
-              </div>
-            )}
+          {/* 用户信息 - 显示用户ID、今日已领、邀请人数、额外奖励（已隐藏） */}
+          {/*
+          <div className="user-info-header" style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: '8px 16px',
+            padding: '12px 16px',
+            background: 'var(--bg-secondary)',
+            borderRadius: '12px',
+            border: '1px solid var(--border-color)'
+          }}>
+            <div className="user-info-item" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="label" style={{ fontSize: '13px', color: 'var(--text-muted)' }}>用户ID:</span>
+              <span className="value" style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>{userVirtualId || "--"}</span>
+            </div>
+            <div className="user-info-item" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="label" style={{ fontSize: '13px', color: 'var(--text-muted)' }}>邀请人数:</span>
+              <span className="value" style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>{inviteCount}</span>
+            </div>
+            <div className="user-info-item" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="label" style={{ fontSize: '13px', color: 'var(--text-muted)' }}>今日已领:</span>
+              <span className="value" style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>
+                {todayClaimed}/{baseLimit}
+                {bonusLimit > 0 && (
+                  <span className="bonus-text" style={{ color: '#F97316', marginLeft: '2px' }}>+{bonusLimit}</span>
+                )}
+              </span>
+            </div>
+            <div className="user-info-item" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="label" style={{ fontSize: '13px', color: 'var(--text-muted)' }}>额外奖励:</span>
+              <span className="value bonus-value" style={{ fontSize: '13px', fontWeight: 500, color: '#F97316' }}>{bonusLimit}</span>
+            </div>
           </div>
+          */}
         </div>
 
         <div className="add-mode-tabs">
           <button
-            className={`mode-tab ${mode === "browser" ? "active" : ""}`}
-            onClick={() => handleModeChange("browser")}
+            className={`mode-tab ${mode === "quick-register" ? "active" : ""}`}
+            onClick={() => handleModeChange("quick-register")}
             disabled={loading || isQrLoading}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="2" y1="12" x2="22" y2="12" />
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              <rect x="3" y="3" width="7" height="7" rx="1" />
+              <rect x="14" y="3" width="7" height="7" rx="1" />
+              <rect x="3" y="14" width="7" height="7" rx="1" />
+              <rect x="14" y="14" width="7" height="7" rx="1" />
             </svg>
-            浏览器登录
+            扫码领号
           </button>
           
           <button
@@ -962,17 +897,16 @@ export function AddAccountModal({
           </button>
           
           <button
-            className={`mode-tab ${mode === "quick-register" ? "active" : ""}`}
-            onClick={() => handleModeChange("quick-register")}
+            className={`mode-tab ${mode === "browser" ? "active" : ""}`}
+            onClick={() => handleModeChange("browser")}
             disabled={loading || isQrLoading}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="3" width="7" height="7" rx="1" />
-              <rect x="14" y="3" width="7" height="7" rx="1" />
-              <rect x="3" y="14" width="7" height="7" rx="1" />
-              <rect x="14" y="14" width="7" height="7" rx="1" />
+              <circle cx="12" cy="12" r="10" />
+              <line x1="2" y1="12" x2="22" y2="12" />
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
             </svg>
-            扫码领号
+            浏览器登录
           </button>
         </div>
 
@@ -1061,11 +995,11 @@ export function AddAccountModal({
                 <span className="config-title">Cloudflare Worker 配置</span>
                 <span 
                   className={`config-badge ${isConfigComplete ? 'configured' : 'unconfigured'}`}
-                  onClick={() => !isConfigComplete && setShowWorkerGuide(true)}
-                  style={{ cursor: isConfigComplete ? 'default' : 'pointer' }}
-                  title={isConfigComplete ? '已配置' : '点击查看配置教程'}
+                  onClick={() => setShowWorkerGuide(true)}
+                  style={{ cursor: 'pointer' }}
+                  title={isConfigComplete ? '点我重新配置' : '点击查看配置教程'}
                 >
-                  {isConfigComplete ? '已配置' : '去配置'}
+                  {isConfigComplete ? '点我重新配置' : '去配置'}
                 </span>
               </div>
               
@@ -1206,148 +1140,7 @@ export function AddAccountModal({
                   </p>
                 </div>
 
-                {/* 用户信息卡片 */}
-                <div style={{
-                  background: 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
-                  borderRadius: '16px',
-                  padding: '20px',
-                  border: '1px solid #e2e8f0',
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
-                }}>
-                  {userInfo ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                      {/* 头像 */}
-                      <div style={{
-                        width: '48px',
-                        height: '48px',
-                        borderRadius: '50%',
-                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        color: 'white',
-                        fontSize: '20px',
-                        fontWeight: 600,
-                        flexShrink: 0
-                      }}>
-                        {(userVirtualId || userInfo.openid).charAt(0).toUpperCase()}
-                      </div>
-                      
-                      {/* 用户信息 */}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ 
-                          fontSize: '15px', 
-                          fontWeight: 600, 
-                          color: 'var(--text-primary)',
-                          marginBottom: '4px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '8px'
-                        }}>
-                          {userVirtualId || `${userInfo.openid.substring(0, 12)}...`}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                          <span style={{
-                            fontSize: '13px',
-                            color: remainingQuota > 0 ? '#059669' : '#dc2626',
-                            fontWeight: 500,
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px'
-                          }}>
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M12 2v20M2 12h20"/>
-                            </svg>
-                            今日已领: {todayClaimed}/{baseLimit + bonusLimit}
-                          </span>
-                          {bonusLimit > 0 && (
-                            <span style={{
-                              fontSize: '11px',
-                              color: '#F97316',
-                              fontWeight: 600,
-                              background: '#fff7ed',
-                              padding: '2px 8px',
-                              borderRadius: '12px'
-                            }}>
-                              含邀请奖励
-                            </span>
-                          )}
-                          {remainingQuota === 0 && (
-                            <span style={{
-                              fontSize: '11px',
-                              color: '#dc2626',
-                              fontWeight: 600,
-                              background: '#fef2f2',
-                              padding: '2px 8px',
-                              borderRadius: '12px'
-                            }}>
-                              已达上限
-                            </span>
-                          )}
-                        </div>
-                      </div>
 
-                      {/* 切换用户按钮 */}
-                      <button
-                        onClick={() => {
-                          clearUserInfo();
-                          setUserInfo(null);
-                          setTodayClaimed(0);
-                          setRemainingQuota(2);
-                          onToast?.("info", "已切换为新用户");
-                        }}
-                        style={{
-                          fontSize: '12px',
-                          padding: '8px 16px',
-                          border: '1px solid #cbd5e1',
-                          borderRadius: '8px',
-                          background: 'white',
-                          color: '#64748b',
-                          cursor: 'pointer',
-                          fontWeight: 500,
-                          transition: 'all 0.2s',
-                          whiteSpace: 'nowrap'
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.borderColor = '#94a3b8';
-                          e.currentTarget.style.color = '#475569';
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.borderColor = '#cbd5e1';
-                          e.currentTarget.style.color = '#64748b';
-                        }}
-                      >
-                        切换用户
-                      </button>
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                      <div style={{
-                        width: '48px',
-                        height: '48px',
-                        borderRadius: '50%',
-                        background: '#f1f5f9',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        color: '#94a3b8'
-                      }}>
-                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                          <circle cx="12" cy="7" r="4"/>
-                        </svg>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: '15px', fontWeight: 600, color: '#64748b' }}>
-                          新用户
-                        </div>
-                        <div style={{ fontSize: '13px', color: '#94a3b8', marginTop: '2px' }}>
-                          扫码后将自动识别身份
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
 
                 {qrError && (
                   <div style={{
@@ -1557,217 +1350,13 @@ export function AddAccountModal({
               </div>
             )}
 
-            {/* 已验证步骤 - 显示用户信息和领取按钮 */}
+            {/* 已验证步骤 - 简化显示，自动领取中 */}
             {qrStep === "verified" && (
               <div className="step-content">
-                <div className="success-section" style={{ padding: '20px 0' }}>
-                  <div className="success-icon" style={{ 
-                    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                    width: '56px',
-                    height: '56px'
-                  }}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" width="28" height="28">
-                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                      <circle cx="12" cy="7" r="4"/>
-                    </svg>
-                  </div>
+                <div className="waiting-section">
+                  <div className="loading-spinner large"></div>
                   <h3>身份验证成功</h3>
-                  
-                  {/* 用户信息卡片 */}
-                  <div style={{
-                    background: 'var(--bg-secondary)',
-                    borderRadius: '12px',
-                    padding: '16px 20px',
-                    margin: '16px 0',
-                    border: '1px solid var(--border-color)',
-                    textAlign: 'left'
-                  }}>
-                    <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '12px',
-                      paddingBottom: '12px',
-                      borderBottom: '1px solid var(--border-color)'
-                    }}>
-                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>用户编号</span>
-                      <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {userVirtualId || (userOpenid ? `${userOpenid.substring(0, 12)}...` : '未知')}
-                      </span>
-                    </div>
-
-                    <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '12px',
-                      paddingBottom: '12px',
-                      borderBottom: '1px solid var(--border-color)'
-                    }}>
-                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>每日基础额度</span>
-                      <span style={{
-                        fontSize: '14px',
-                        fontWeight: 600,
-                        color: 'var(--text-primary)'
-                      }}>
-                        {baseLimit} 次
-                      </span>
-                    </div>
-
-                    {bonusLimit > 0 && (
-                      <div style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        marginBottom: '12px',
-                        paddingBottom: '12px',
-                        borderBottom: '1px solid var(--border-color)'
-                      }}>
-                        <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>邀请奖励剩余</span>
-                        <span style={{
-                          fontSize: '14px',
-                          fontWeight: 600,
-                          color: '#F97316'
-                        }}>
-                          {bonusLimit} 次
-                        </span>
-                      </div>
-                    )}
-
-                    <div style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      marginBottom: '12px',
-                      paddingBottom: '12px',
-                      borderBottom: '1px solid var(--border-color)'
-                    }}>
-                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>今日已领取</span>
-                      <span style={{
-                        fontSize: '14px',
-                        fontWeight: 600,
-                        color: todayClaimed >= baseLimit ? '#ef4444' : '#10b981'
-                      }}>
-                        {todayClaimed} 次
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>当前剩余次数</span>
-                      <span style={{
-                        fontSize: '18px',
-                        fontWeight: 700,
-                        color: remainingQuota > 0 ? '#10b981' : '#ef4444'
-                      }}>
-                        {remainingQuota} 次
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* 邀请奖励额度提示 */}
-                  {isUsingBonusQuota && (
-                    <div style={{
-                      background: '#fff7ed',
-                      border: '1px solid #fdba74',
-                      borderRadius: '8px',
-                      padding: '10px 14px',
-                      marginBottom: '16px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px'
-                    }}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2">
-                        <path d="M12 2v20M2 12h20"/>
-                      </svg>
-                      <span style={{ fontSize: '13px', color: '#c2410c' }}>
-                        基础额度已用完，当前正在消耗邀请奖励额度
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Token 有效期提示 */}
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '6px',
-                    fontSize: '12px',
-                    color: 'var(--text-muted)',
-                    marginBottom: '16px'
-                  }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="10"/>
-                      <polyline points="12 6 12 12 16 14"/>
-                    </svg>
-                    登录有效期剩余: {formatCountdown(tokenCountdown)}
-                  </div>
-
-                  {/* 邀请码输入 */}
-                  {remainingQuota > 0 && (
-                    <div style={{ marginBottom: '20px' }}>
-                      <input
-                        type="text"
-                        value={inviteCode}
-                        onChange={(e) => setInviteCode(e.target.value.toUpperCase().trim())}
-                        placeholder="邀请码（选填）"
-                        maxLength={6}
-                        disabled={claimCooldown > 0}
-                        style={{
-                          width: '100%',
-                          height: '42px',
-                          padding: '0 16px',
-                          fontSize: '15px',
-                          fontWeight: 500,
-                          textAlign: 'center',
-                          letterSpacing: '4px',
-                          border: '1px solid var(--border)',
-                          borderRadius: '8px',
-                          background: claimCooldown > 0 ? 'var(--bg-disabled)' : 'var(--bg-input)',
-                          color: 'var(--text-primary)',
-                          outline: 'none',
-                          transition: 'all 0.2s'
-                        }}
-                        onFocus={(e) => { if (claimCooldown === 0) e.target.style.borderColor = 'var(--accent)'; }}
-                        onBlur={(e) => e.target.style.borderColor = 'var(--border)'}
-                      />
-                      <p style={{ fontSize: '12px', color: 'var(--accent)', marginTop: '8px', textAlign: 'center' }}>
-                        输入邀请码可获得额外奖励
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                <div className="modal-actions">
-                  <button type="button" onClick={handleQrRetry}>
-                    重新扫码
-                  </button>
-                  {remainingQuota > 0 ? (
-                    <button
-                      type="button"
-                      className="primary"
-                      onClick={handleClaimResource}
-                      disabled={claimCooldown > 0}
-                      style={{ position: 'relative' }}
-                    >
-                      {claimCooldown > 0 ? (
-                        <span>等待 {claimCooldown}s</span>
-                      ) : (
-                        <span>立即领取账号</span>
-                      )}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled
-                      style={{ 
-                        background: '#ef4444', 
-                        opacity: 0.6,
-                        cursor: 'not-allowed'
-                      }}
-                    >
-                      今日额度已用完
-                    </button>
-                  )}
+                  <p>正在自动领取账号，请稍候...</p>
                 </div>
               </div>
             )}
@@ -1794,28 +1383,6 @@ export function AddAccountModal({
                   </div>
                   <h3>导入成功!</h3>
                   <p>已成功导入 {addedAccounts.length} 个账号</p>
-                  
-                  {/* 后端返回的 message */}
-                  {claimMessage && (
-                    <div style={{
-                      background: 'var(--bg-card)',
-                      borderRadius: '8px',
-                      padding: '12px',
-                      margin: '12px 0',
-                      border: '1px solid var(--border)',
-                      textAlign: 'left'
-                    }}>
-                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                        </svg>
-                        领取提示
-                      </div>
-                      <pre style={{ fontSize: '12px', color: 'var(--text-primary)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0, fontFamily: 'inherit' }}>
-                        {claimMessage}
-                      </pre>
-                    </div>
-                  )}
 
                   {/* 剩余次数提示 */}
                   {remainingQuota > 0 ? (
@@ -1898,15 +1465,6 @@ export function AddAccountModal({
                       </p>
                     </div>
                   )}
-                  
-                  <div className="imported-accounts">
-                    {addedAccounts.map((account, index) => (
-                      <div key={account.id} className="imported-account-item">
-                        <span className="account-index">{index + 1}</span>
-                        <span className="account-email">{account.email}</span>
-                      </div>
-                    ))}
-                  </div>
                 </div>
 
                 <div className="modal-actions">

@@ -1,4 +1,7 @@
 import { useState } from "react";
+import { checkForUpdate, getCurrentVersion, openDownloadPage } from "../utils/updateChecker";
+import { UpdateModal } from "../components/UpdateModal";
+import type { UpdateInfo } from "../utils/updateChecker";
 
 interface AboutProps {
   onToast?: (type: "success" | "error" | "warning" | "info", message: string, duration?: number) => void;
@@ -49,6 +52,9 @@ const icons = {
 
 export function About({ onToast }: AboutProps) {
   const [showQrModal, setShowQrModal] = useState<string | null>(null);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
 
   // 处理赞助按钮点击
   const handleSponsorClick = (type: string) => {
@@ -95,6 +101,36 @@ export function About({ onToast }: AboutProps) {
     }
   };
 
+  // 检查更新
+  const handleCheckUpdate = async () => {
+    setIsCheckingUpdate(true);
+    try {
+      const update = await checkForUpdate();
+      
+      if (update) {
+        setUpdateInfo(update);
+        setUpdateModalOpen(true);
+      } else {
+        onToast?.("success", "当前已是最新版本", 2000);
+      }
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  // 执行下载
+  const handleDoDownload = async () => {
+    try {
+      if (updateInfo?.downloadUrl) {
+        await openDownloadPage(updateInfo.downloadUrl);
+        onToast?.("success", "已打开下载页面", 2000);
+      }
+    } catch (error) {
+      onToast?.("error", "打开下载页面失败", 2000);
+      throw error;
+    }
+  };
+
   return (
     <div className="about-page">
       <div className="about-card">
@@ -104,9 +140,29 @@ export function About({ onToast }: AboutProps) {
           <div className="about-header-text">
             <div className="title-row">
               <h1 className="about-title">Trae账号管理</h1>
-              <span className="version">v1.0.5</span>
+              <span className="version">v{getCurrentVersion()}</span>
             </div>
           </div>
+          <button
+            className="check-update-btn"
+            onClick={handleCheckUpdate}
+            disabled={isCheckingUpdate}
+            title="检查更新"
+          >
+            {isCheckingUpdate ? (
+              <svg className="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                <path d="M16 21h5v-5"/>
+              </svg>
+            )}
+            {isCheckingUpdate ? "检查中..." : "检查更新"}
+          </button>
         </div>
         
         {/* 说明和信息横向排列 */}
@@ -218,6 +274,14 @@ export function About({ onToast }: AboutProps) {
           Made with {icons.heart} by HJH · MIT License
         </div>
       </div>
+
+      {/* 更新弹窗 */}
+      <UpdateModal
+        isOpen={updateModalOpen}
+        updateInfo={updateInfo}
+        onClose={() => setUpdateModalOpen(false)}
+        onDownload={handleDoDownload}
+      />
 
       {/* 二维码弹窗 */}
       {showQrModal && (

@@ -3,6 +3,7 @@ import { ThemeSwitcher } from "./ThemeSwitcher";
 interface SidebarProps {
   currentPage: string;
   onNavigate: (page: string) => void;
+  onAddAccount?: () => void;
 }
 
 const menuItems = [
@@ -53,7 +54,7 @@ const menuItems = [
   },
 ];
 
-export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
+export function Sidebar({ currentPage, onNavigate, onAddAccount }: SidebarProps) {
   return (
     <aside className="sidebar">
       <nav className="sidebar-nav">
@@ -70,6 +71,19 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
       </nav>
 
       <div className="sidebar-footer">
+        {onAddAccount && (
+          <button
+            className="sidebar-add-btn"
+            onClick={onAddAccount}
+            title="添加账号"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="12" y1="5" x2="12" y2="19"/>
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            添加账号
+          </button>
+        )}
         <ThemeSwitcher />
       </div>
     </aside>

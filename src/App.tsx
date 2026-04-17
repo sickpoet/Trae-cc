@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { Sidebar } from "./components/Sidebar";
@@ -10,12 +10,15 @@ import { DetailModal } from "./components/DetailModal";
 import { AccountLoginModal } from "./components/AccountLoginModal";
 import { Toast, ToastMessage } from "./components/Toast";
 import { ConfirmModal } from "./components/ConfirmModal";
+import { UpdateModal } from "./components/UpdateModal";
 import { Stats } from "./pages/Stats";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
 
 import * as api from "./api";
 import type { Account, AccountBrief, AppSettings, UsageSummary } from "./types";
+import { checkForUpdate, openDownloadPage } from "./utils/updateChecker";
+import type { UpdateInfo } from "./utils/updateChecker";
 import "./App.css";
 
 interface AccountWithUsage extends AccountBrief {
@@ -38,6 +41,7 @@ function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [emailFilter, setEmailFilter] = useState("");
   const [quotaFilter, setQuotaFilter] = useState<"all" | "with" | "without">("all");
+  const [showBatchDropdown, setShowBatchDropdown] = useState(false);
 
   // Toast 通知状态
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -73,12 +77,28 @@ function App() {
     initialEmail?: string;
   } | null>(null);
 
+  // 更新弹窗状态
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+
   const quickRegisterNoticeRef = useRef<Map<string, number>>(new Map());
   const toastDedupRef = useRef<Map<string, number>>(new Map());
   const quickRegisterShowWindow = appSettings?.quick_register_show_window ?? false;
+  const batchDropdownRef = useRef<HTMLDivElement>(null);
 
   // 网络状态监听
   const offlineToastIdRef = useRef<string | null>(null);
+
+  // 点击外部关闭批量操作下拉菜单
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (batchDropdownRef.current && !batchDropdownRef.current.contains(event.target as Node)) {
+        setShowBatchDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
 
 
@@ -296,6 +316,56 @@ function App() {
     loadAccounts();
   }, [loadAccounts]);
 
+  // 启动时检查更新（延迟3秒，避免影响启动速度）
+  useEffect(() => {
+    const checkUpdateOnStartup = async () => {
+      // 检查是否已经提示过本次更新
+      const lastDismissedVersion = localStorage.getItem("dismissed_update_version");
+      
+      try {
+        const update = await checkForUpdate();
+        
+        if (update) {
+          // 如果用户已经忽略了这个版本，不再提示
+          if (lastDismissedVersion === update.version) {
+            console.log("用户已忽略此版本更新:", update.version);
+            return;
+          }
+          
+          setUpdateInfo(update);
+          setUpdateModalOpen(true);
+        }
+      } catch (error) {
+        console.error("启动时检查更新失败:", error);
+      }
+    };
+
+    // 延迟3秒检查更新
+    const timer = setTimeout(checkUpdateOnStartup, 3000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // 处理下载
+  const handleDoDownload = async () => {
+    try {
+      if (updateInfo?.downloadUrl) {
+        await openDownloadPage(updateInfo.downloadUrl);
+        addToast("success", "已打开下载页面");
+      }
+    } catch (error) {
+      addToast("error", "打开下载页面失败");
+      throw error;
+    }
+  };
+
+  // 关闭更新弹窗时记录用户忽略的版本
+  const handleCloseUpdateModal = () => {
+    if (updateInfo) {
+      localStorage.setItem("dismissed_update_version", updateInfo.version);
+    }
+    setUpdateModalOpen(false);
+  };
+
   // 删除账号
   const handleDeleteAccount = async (accountId: string) => {
     setConfirmModal({
@@ -407,12 +477,24 @@ function App() {
     });
   };
 
-  // 全选/取消全选
+  // 全选/取消全选 - 只选中筛选后的账号
   const handleSelectAll = () => {
-    if (selectedIds.size === accounts.length) {
-      setSelectedIds(new Set());
+    const allVisibleSelected = visibleAccounts.every((account) => selectedIds.has(account.id));
+    
+    if (allVisibleSelected) {
+      // 取消全选 - 只取消当前筛选结果的选中状态
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        visibleAccounts.forEach((account) => next.delete(account.id));
+        return next;
+      });
     } else {
-      setSelectedIds(new Set(accounts.map((account) => account.id)));
+      // 全选 - 选中所有筛选后的账号
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        visibleAccounts.forEach((account) => next.add(account.id));
+        return next;
+      });
     }
   };
 
@@ -902,35 +984,79 @@ function App() {
     }
   };
 
+  // 删除无额度账号
+  const handleDeleteNoQuotaAccounts = async () => {
+    // 找出无额度的账号（usage 不存在或 fast_dollar_left <= 0）
+    const noQuotaAccounts = accounts.filter(
+      (account) => !account.usage || account.usage.fast_dollar_left <= 0
+    );
+
+    if (noQuotaAccounts.length === 0) {
+      addToast("success", "没有无额度的账号需要删除");
+      return;
+    }
+
+    // 显示确认对话框
+    const accountList = noQuotaAccounts.map((account) => {
+      const displayName = account.name || account.email || "未知账号";
+      return `• ${displayName}`;
+    }).join("\n");
+
+    setConfirmModal({
+      isOpen: true,
+      title: "删除无额度账号",
+      message: `确定要删除 ${noQuotaAccounts.length} 个无额度的账号吗？此操作无法撤销。\n\n${accountList}`,
+      type: "danger",
+      confirmText: "删除",
+      cancelText: "取消",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          const idsToDelete = noQuotaAccounts.map((account) => account.id);
+          const deletedAccounts = await api.removeAccountsByIds(idsToDelete);
+          setAccounts((prev) =>
+            prev.filter((account) => !idsToDelete.includes(account.id))
+          );
+          setSelectedIds(new Set());
+          addToast("success", `已删除 ${deletedAccounts.length} 个无额度账号`);
+        } catch (err: any) {
+          addToast("error", err.message || "删除失败");
+        }
+      },
+    });
+  };
+
   const normalizedFilter = (emailFilter || "").trim().toLowerCase();
-  const visibleAccounts = Array.isArray(accounts)
-    ? [...accounts]
-        .filter((account) => {
-          // 邮箱搜索过滤
-          if (normalizedFilter && !(account.email || account.name || "").toLowerCase().includes(normalizedFilter)) {
-            return false;
-          }
-          // 额度筛选
-          if (quotaFilter === "with") {
-            // 有剩余额度：usage 存在且 fast_dollar_left > 0
-            return account.usage && account.usage.fast_dollar_left > 0;
-          } else if (quotaFilter === "without") {
-            // 无剩余额度：usage 不存在或 fast_dollar_left <= 0
-            return !account.usage || account.usage.fast_dollar_left <= 0;
-          }
-          return true;
-        })
-        .sort((a, b) => {
-          // 当前使用的账号排在最前面
-          if (a.is_current && !b.is_current) return -1;
-          if (!a.is_current && b.is_current) return 1;
-          return 0;
-        })
-    : [];
+  const visibleAccounts = useMemo(() => {
+    return Array.isArray(accounts)
+      ? [...accounts]
+          .filter((account) => {
+            // 邮箱搜索过滤
+            if (normalizedFilter && !(account.email || account.name || "").toLowerCase().includes(normalizedFilter)) {
+              return false;
+            }
+            // 额度筛选
+            if (quotaFilter === "with") {
+              // 有剩余额度：usage 存在且 fast_dollar_left > 0
+              return account.usage && account.usage.fast_dollar_left > 0;
+            } else if (quotaFilter === "without") {
+              // 无剩余额度：usage 不存在或 fast_dollar_left <= 0
+              return !account.usage || account.usage.fast_dollar_left <= 0;
+            }
+            return true;
+          })
+          .sort((a, b) => {
+            // 当前使用的账号排在最前面
+            if (a.is_current && !b.is_current) return -1;
+            if (!a.is_current && b.is_current) return 1;
+            return 0;
+          })
+      : [];
+  }, [accounts, normalizedFilter, quotaFilter]);
 
   return (
     <div className="app">
-      <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} />
+      <Sidebar currentPage={currentPage} onNavigate={setCurrentPage} onAddAccount={() => setShowAddModal(true)} />
 
       <div className="app-content">
         {error && (
@@ -956,7 +1082,7 @@ function App() {
                       onClick={handleSelectAll}
                       style={{ padding: "8px 14px" }}
                     >
-                      {selectedIds.size === accounts.length && accounts.length > 0 ? "取消全选" : "全选"}
+                      {visibleAccounts.length > 0 && visibleAccounts.every((account) => selectedIds.has(account.id)) ? "取消全选" : "全选"}
                     </button>
                     <div className="toolbar-search">
                       <svg
@@ -1020,27 +1146,7 @@ function App() {
                         </svg>
                       </button>
                     </div>
-                    <button
-                      className="header-btn danger"
-                      onClick={handleCheckInvalidAccounts}
-                      title="检测并选中 Token 无效的账号"
-                      style={{ padding: "6px 10px", marginLeft: "8px", fontSize: "12px" }}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        width="14"
-                        height="14"
-                        style={{ marginRight: "4px", verticalAlign: "middle" }}
-                      >
-                        <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                        <line x1="10" y1="11" x2="10" y2="17"/>
-                        <line x1="14" y1="11" x2="14" y2="17"/>
-                      </svg>
-                      清理无效
-                    </button>
+                    
                     {selectedIds.size > 0 && (
                       <div className="batch-actions">
                         <button className="batch-btn" onClick={handleBatchRefresh}>
@@ -1072,10 +1178,136 @@ function App() {
                       </div>
                     )}
                   </div>
+                  
+                  {/* 右侧 - 更多操作 */}
                   <div className="toolbar-right">
-                    <button className="add-btn" onClick={() => setShowAddModal(true)} style={{padding: '8px 16px', fontSize: '13px'}}>
-                      <span>+</span> 添加账号
-                    </button>
+                    {/* 更多操作下拉按钮 */}
+                    <div ref={batchDropdownRef} className="batch-dropdown-container">
+                      <button
+                        className="header-btn more-actions-btn"
+                        onClick={() => setShowBatchDropdown(!showBatchDropdown)}
+                        style={{ padding: "6px 12px", fontSize: "12px" }}
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          width="14"
+                          height="14"
+                          style={{ marginRight: "4px", verticalAlign: "middle" }}
+                        >
+                          <circle cx="12" cy="12" r="1" />
+                          <circle cx="19" cy="12" r="1" />
+                          <circle cx="5" cy="12" r="1" />
+                        </svg>
+                        更多
+                        <svg
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          width="12"
+                          height="12"
+                          style={{ marginLeft: "4px", verticalAlign: "middle", transform: showBatchDropdown ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}
+                        >
+                          <polyline points="6 9 12 15 18 9"/>
+                        </svg>
+                      </button>
+                      
+                      {showBatchDropdown && (
+                        <div className="batch-dropdown-menu">
+                          <button
+                            className="dropdown-item"
+                            onClick={() => {
+                              setShowBatchDropdown(false);
+                              handleImportAccounts();
+                            }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                              <polyline points="7 10 12 15 17 10"/>
+                              <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            导入账号
+                          </button>
+                          <button
+                            className="dropdown-item"
+                            onClick={() => {
+                              setShowBatchDropdown(false);
+                              handleExportAccounts();
+                            }}
+                            disabled={accounts.length === 0}
+                            style={{ opacity: accounts.length === 0 ? 0.5 : 1, cursor: accounts.length === 0 ? "not-allowed" : "pointer" }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                              <polyline points="17 8 12 3 7 8"/>
+                              <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            导出账号
+                          </button>
+                          <div className="dropdown-divider" />
+                          <button
+                            className="dropdown-item"
+                            onClick={() => {
+                              setShowBatchDropdown(false);
+                              handleCheckInvalidAccounts();
+                            }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                              <line x1="10" y1="11" x2="10" y2="17"/>
+                              <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            清理无效账号
+                          </button>
+                          <button
+                            className="dropdown-item danger"
+                            onClick={() => {
+                              setShowBatchDropdown(false);
+                              handleDeleteNoQuotaAccounts();
+                            }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                              <line x1="10" y1="11" x2="10" y2="17"/>
+                              <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            删除无额度账号
+                          </button>
+                          <div className="dropdown-divider" />
+                          <button
+                            className="dropdown-item"
+                            onClick={() => {
+                              setShowBatchDropdown(false);
+                              handleBatchRefresh();
+                            }}
+                            disabled={selectedIds.size === 0}
+                            style={{ opacity: selectedIds.size === 0 ? 0.5 : 1, cursor: selectedIds.size === 0 ? "not-allowed" : "pointer" }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                              <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                            </svg>
+                            刷新选中 ({selectedIds.size})
+                          </button>
+                          <button
+                            className="dropdown-item danger"
+                            onClick={() => {
+                              setShowBatchDropdown(false);
+                              handleBatchDelete();
+                            }}
+                            disabled={selectedIds.size === 0}
+                            style={{ opacity: selectedIds.size === 0 ? 0.5 : 1, cursor: selectedIds.size === 0 ? "not-allowed" : "pointer" }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                            </svg>
+                            删除选中 ({selectedIds.size})
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1243,6 +1475,14 @@ function App() {
         initialEmail={loginModal?.initialEmail}
         onClose={() => setLoginModal(null)}
         onSubmit={handleLoginSubmit}
+      />
+
+      {/* 更新弹窗 */}
+      <UpdateModal
+        isOpen={updateModalOpen}
+        updateInfo={updateInfo}
+        onClose={handleCloseUpdateModal}
+        onDownload={handleDoDownload}
       />
     </div>
   );
