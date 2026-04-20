@@ -1,115 +1,129 @@
 import { useEffect, useState } from "react";
-import type { ErrorCode, ErrorConfig } from "../types/errorCodes";
+import type { ErrorCode } from "../types/errorCodes";
 import { ERROR_CONFIG_MAP } from "../types/errorCodes";
 import "./ErrorModal.css";
 
 interface ErrorModalProps {
   isOpen: boolean;
-  errorCode: ErrorCode | null;
-  customMessage?: string;
+  code: ErrorCode;
+  message?: string;
   onClose: () => void;
-  onAction?: () => void;
+  onRetry?: () => void;
 }
 
-// 图标组件
-const ErrorIcon = ({ type }: { type: ErrorConfig["icon"] }) => {
-  const icons = {
-    limit: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <circle cx="12" cy="12" r="10" />
-        <path d="M12 6v6l4 2" />
-        <path d="M8 12h8" strokeLinecap="round" />
-      </svg>
-    ),
-    empty: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-      </svg>
-    ),
-    expired: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <circle cx="12" cy="12" r="10" />
-        <polyline points="12 6 12 12 16 14" />
-        <path d="M4 4l16 16" strokeLinecap="round" />
-      </svg>
-    ),
-    error: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="15" y1="9" x2="9" y2="15" />
-        <line x1="9" y1="9" x2="15" y2="15" />
-      </svg>
-    ),
-    success: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <circle cx="12" cy="12" r="10" />
-        <polyline points="20 6 9 17 4 12" />
-      </svg>
-    ),
-  };
+// 可重试的错误码
+const RETRYABLE_ERRORS: ErrorCode[] = ["NETWORK_ERROR", "SERVER_ERROR", "RATE_LIMITED"];
 
-  return <div className={`error-icon ${type}`}>{icons[type]}</div>;
-};
+function isRetryableError(code: ErrorCode): boolean {
+  return RETRYABLE_ERRORS.includes(code);
+}
 
-export function ErrorModal({
-  isOpen,
-  errorCode,
-  customMessage,
-  onClose,
-  onAction,
-}: ErrorModalProps) {
+export function ErrorModal({ isOpen, code, message, onClose, onRetry }: ErrorModalProps) {
   const [isVisible, setIsVisible] = useState(false);
+  const [isShaking, setIsShaking] = useState(false);
+
+  const errorInfo = ERROR_CONFIG_MAP[code] || ERROR_CONFIG_MAP["SERVER_ERROR"];
+  const displayMessage = message || errorInfo.message;
 
   useEffect(() => {
     if (isOpen) {
-      setTimeout(() => setIsVisible(true), 10);
+      setIsVisible(true);
+      setIsShaking(true);
+      const timer = setTimeout(() => setIsShaking(false), 500);
+      return () => clearTimeout(timer);
     } else {
-      setIsVisible(false);
+      const timer = setTimeout(() => setIsVisible(false), 300);
+      return () => clearTimeout(timer);
     }
   }, [isOpen]);
 
-  if (!isOpen || !errorCode) return null;
+  if (!isVisible && !isOpen) return null;
 
-  const config = ERROR_CONFIG_MAP[errorCode];
-  const displayMessage = customMessage || config.message;
+  const canRetry = isRetryableError(code) && onRetry;
 
-  const handleAction = () => {
-    if (onAction) {
-      onAction();
-    } else {
-      onClose();
+  const getIcon = () => {
+    switch (errorInfo.icon) {
+      case "limit":
+        return (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+        );
+      case "empty":
+        return (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+            <circle cx="12" cy="7" r="4" />
+          </svg>
+        );
+      case "expired":
+        return (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+        );
+      case "success":
+        return (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+            <polyline points="22 4 12 14.01 9 11.01" />
+          </svg>
+        );
+      default:
+        return (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="15" y1="9" x2="9" y2="15" />
+            <line x1="9" y1="9" x2="15" y2="15" />
+          </svg>
+        );
     }
   };
 
   return (
-    <div
-      className={`error-modal-overlay ${isVisible ? "visible" : ""}`}
-      onClick={onClose}
-    >
+    <div className={`error-modal-overlay ${isOpen ? "visible" : ""}`} onClick={onClose}>
       <div
-        className={`error-modal-content ${isVisible ? "visible" : ""}`}
+        className={`error-modal-content ${isOpen ? "visible" : ""} ${isShaking ? "shake" : ""}`}
         onClick={(e) => e.stopPropagation()}
       >
         <button className="error-modal-close" onClick={onClose}>
           ×
         </button>
 
-        <div className="error-modal-body">
-          <ErrorIcon type={config.icon} />
+        <div className={`error-icon ${errorInfo.icon}`}>{getIcon()}</div>
 
-          <h3 className="error-modal-title">{config.title}</h3>
+        <h3 className="error-modal-title">{errorInfo.title}</h3>
 
-          <p className="error-modal-message">{displayMessage}</p>
+        <p className="error-modal-message">{displayMessage}</p>
 
-          {config.description && (
-            <p className="error-modal-description">{config.description}</p>
-          )}
-        </div>
+        {errorInfo.description && (
+          <p className="error-modal-description">{errorInfo.description}</p>
+        )}
 
         <div className="error-modal-actions">
-          <button className="error-modal-btn primary" onClick={handleAction}>
-            {config.actionText || "确定"}
-          </button>
+          {canRetry ? (
+            <>
+              <button
+                className="error-modal-btn primary"
+                onClick={() => {
+                  onClose();
+                  onRetry();
+                }}
+              >
+                重试
+              </button>
+              <button className="error-modal-btn" onClick={onClose} style={{ marginLeft: "12px" }}>
+                取消
+              </button>
+            </>
+          ) : (
+            <button className="error-modal-btn primary" onClick={onClose}>
+              知道了
+            </button>
+          )}
         </div>
       </div>
     </div>

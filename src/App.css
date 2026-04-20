@@ -1524,7 +1524,8 @@ body {
 /* Card Meta - 元信息 */
 .card-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  justify-content: space-between;
   gap: var(--space-md);
   font-size: 12px;
   color: var(--text-muted);
@@ -1535,6 +1536,15 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
+}
+
+.meta-item:first-child {
+  margin-right: auto;
+}
+
+.meta-item:nth-child(2) {
+  margin-left: auto;
 }
 
 .meta-item.warning {
@@ -1946,6 +1956,9 @@ body {
   min-width: 120px;
   position: relative;
   overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .modal-actions button::before {
@@ -1958,10 +1971,17 @@ body {
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 255, 255, 0.15),
+    rgba(255, 255, 255, 0.2),
     transparent
   );
   transition: left 0.4s ease;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.modal-actions button > * {
+  position: relative;
+  z-index: 1;
 }
 
 .modal-actions button:hover:not(:disabled) {
@@ -1982,7 +2002,7 @@ body {
 .modal-actions button.primary {
   background: var(--gradient-accent);
   border-color: transparent;
-  color: var(--text-inverse);
+  color: #ffffff;
   box-shadow: 
     0 4px 14px rgba(102, 126, 234, 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.2);

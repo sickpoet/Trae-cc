@@ -10,9 +10,6 @@ import {
   getCurrentOpenid,
   getCurrentPlatformId,
   initOrUpdateUserInfo,
-  recordClaim,
-  getTodayClaimCount,
-  getRemainingClaims,
   savePcToken,
   getPcToken,
   clearPcToken,
@@ -112,20 +109,13 @@ export function AddAccountModal({
 
   // 用户信息
   const [, setUserInfo] = useState<StoredUserInfo | null>(null);
-  const [, setTodayClaimed] = useState(0);
-  const [remainingQuota, setRemainingQuota] = useState(0);
-  const [, setInviteCount] = useState(0);                    // 邀请人数
 
   // ===== 新流程状态 =====
   const [, setPcToken] = useState<string | null>(null);                  // PC 绑定令牌
   const [, setUserOpenid] = useState<string | null>(null);               // 当前用户 OpenID
   const [, setUserVirtualId] = useState<string | null>(null); // 当前用户 Virtual ID（显示用）
-  const [, setBaseLimit] = useState(2);                         // 基础每日限额
-  const [, setBonusLimit] = useState(0);                       // 邀请奖励剩余额度
   const [, setTokenCountdown] = useState(600);                           // Token 倒计时
-  const [, setCanClaim] = useState(false);                               // 是否可以领取
   const [claimCooldown, setClaimCooldown] = useState(0);                 // 领取按钮冷却时间
-  const [, setIsUsingBonusQuota] = useState(false);                      // 是否正在使用邀请奖励额度
 
   // 历史记录弹窗状态
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
@@ -183,55 +173,36 @@ export function AddAccountModal({
         setPcToken(existingToken);
         setTokenCountdown(getPcTokenRemainingTime());
 
-        // 如果有 PC Token，从后端获取最新的配额信息
+        // 如果有 PC Token，从后端获取用户信息
         const fetchUserInfo = async () => {
           try {
             const userResponse = await api.getUserInfo(existingToken);
             if (userResponse.success) {
-              const { basic, claim_limit, invitation } = userResponse.data;
+              const { basic } = userResponse.data;
 
               // 更新用户信息
               setUserOpenid(basic.openid);
               setUserVirtualId(basic.virtual_id);
-              setTodayClaimed(claim_limit.current_usage);
-              setRemainingQuota(claim_limit.remaining);
-              setBaseLimit(claim_limit.base_limit);
-              setBonusLimit(claim_limit.bonus_limit);
-              setInviteCount(invitation?.total_invited || 0);
-              setCanClaim(claim_limit.remaining > 0);
-              setIsUsingBonusQuota(claim_limit.current_usage >= claim_limit.base_limit && claim_limit.remaining > 0);
 
               // 更新本地存储
               const platformId = getCurrentPlatformId();
               initOrUpdateUserInfo(basic.openid, platformId, basic.virtual_id);
 
-              // 如果还有剩余次数，自动进入已验证状态
-              if (claim_limit.remaining > 0) {
-                setQrStep("verified");
-              }
+              // 自动进入已验证状态
+              setQrStep("verified");
             } else {
               // Token 无效，清除本地状态
               clearPcToken();
               setPcToken(null);
-              // 回退到本地存储的数据
-              setTodayClaimed(getTodayClaimCount());
-              setRemainingQuota(getRemainingClaims());
               onToast?.("warning", "登录已过期，请重新扫码");
             }
           } catch (error) {
             console.error("获取用户信息失败:", error);
-            // 回退到本地存储的数据
-            setTodayClaimed(getTodayClaimCount());
-            setRemainingQuota(getRemainingClaims());
             onToast?.("error", "获取用户信息失败，请重新扫码");
           }
         };
 
         void fetchUserInfo();
-      } else {
-        // 没有 PC Token，使用本地存储的数据
-        setTodayClaimed(getTodayClaimCount());
-        setRemainingQuota(getRemainingClaims());
       }
     }
   }, [isOpen]);
@@ -387,12 +358,8 @@ export function AddAccountModal({
     setPcToken(null);
     setUserOpenid(null);
     setUserVirtualId(null);
-    setBaseLimit(2);
-    setBonusLimit(0);
     setTokenCountdown(600);
-    setCanClaim(false);
     setClaimCooldown(0);
-    setIsUsingBonusQuota(false);
   };
 
   const handleReadTraeAccount = async () => {
@@ -594,20 +561,11 @@ export function AddAccountModal({
       }
 
       // 从嵌套数据结构中提取用户信息
-      const { basic, claim_limit, invitation } = userResponse.data;
+      const { basic } = userResponse.data;
       
       // 保存用户信息
       setUserOpenid(basic.openid);
       setUserVirtualId(basic.virtual_id);  // 保存 virtual_id 用于显示
-      setTodayClaimed(claim_limit.current_usage);
-      setRemainingQuota(claim_limit.remaining);
-      setBaseLimit(claim_limit.base_limit);
-      setBonusLimit(claim_limit.bonus_limit);
-      setInviteCount(invitation?.total_invited || 0);
-      setCanClaim(claim_limit.remaining > 0);
-
-      // 判断是否正在使用邀请奖励额度（基础额度已用完但还有剩余次数）
-      setIsUsingBonusQuota(claim_limit.current_usage >= claim_limit.base_limit && claim_limit.remaining > 0);
 
       // 更新本地存储的用户信息（同时保存 virtualId）
       const platformId = finalStatus.platform_id || getCurrentPlatformId();
@@ -650,12 +608,6 @@ export function AddAccountModal({
     if (!ticket) {
       setQrError("任务票据无效");
       setQrStep("error");
-      return;
-    }
-
-    // 检查是否还有剩余额度
-    if (remainingQuota <= 0) {
-      showErrorModal("DAILY_LIMIT_REACHED");
       return;
     }
 
@@ -722,13 +674,6 @@ export function AddAccountModal({
       if (importedAccounts.length > 0) {
         setAddedAccounts(importedAccounts);
         setQrStep("success");
-        // 记录领取
-        recordClaim();
-        // 更新剩余次数
-        setTodayClaimed(prev => prev + 1);
-        setRemainingQuota(prev => Math.max(0, prev - 1));
-        setCanClaim(remainingQuota > 1);
-        
         importedAccounts.forEach(acc => onAccountAdded?.(acc));
         onToast?.("success", `成功导入 ${importedAccounts.length} 个账号`);
         // 添加到历史记录
@@ -1386,47 +1331,6 @@ export function AddAccountModal({
                   <h3>导入成功!</h3>
                   <p>已成功导入 {addedAccounts.length} 个账号</p>
 
-                  {/* 剩余次数提示 */}
-                  {remainingQuota > 0 ? (
-                    <div style={{
-                      background: '#f0fdf4',
-                      border: '1px solid #86efac',
-                      borderRadius: '8px',
-                      padding: '10px 14px',
-                      margin: '12px 0',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px'
-                    }}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2">
-                        <polyline points="20 6 9 17 4 12"/>
-                      </svg>
-                      <span style={{ fontSize: '13px', color: '#15803d' }}>
-                        今日还可领取 {remainingQuota} 次
-                      </span>
-                    </div>
-                  ) : (
-                    <div style={{
-                      background: '#fef2f2',
-                      border: '1px solid #fecaca',
-                      borderRadius: '8px',
-                      padding: '10px 14px',
-                      margin: '12px 0',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px'
-                    }}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2">
-                        <circle cx="12" cy="12" r="10"/>
-                        <line x1="12" y1="8" x2="12" y2="12"/>
-                        <line x1="12" y1="16" x2="12.01" y2="16"/>
-                      </svg>
-                      <span style={{ fontSize: '13px', color: '#b91c1c' }}>
-                        今日次数已用完，请邀请好友获取更多额度
-                      </span>
-                    </div>
-                  )}
-                  
                   {/* 我的专属邀请码 */}
                   {myInviteCode && (
                     <div style={{ 
@@ -1603,21 +1507,21 @@ export function AddAccountModal({
       />
 
       {/* 错误弹窗 */}
-      <ErrorModal
-        isOpen={errorModalOpen}
-        errorCode={errorCode}
-        customMessage={errorMessage}
-        onClose={closeErrorModal}
-        onAction={() => {
-          closeErrorModal();
-          // 根据错误类型执行不同操作
-          if (errorCode === "DAILY_LIMIT_REACHED") {
-            handleClose();
-          } else if (errorCode === "RESOURCE_EMPTY" || errorCode === "TASK_EXPIRED") {
-            handleQrRetry();
-          }
-        }}
-      />
+      {errorCode && (
+        <ErrorModal
+          isOpen={errorModalOpen}
+          code={errorCode}
+          message={errorMessage}
+          onClose={closeErrorModal}
+          onRetry={() => {
+            closeErrorModal();
+            // 根据错误类型执行不同操作
+            if (errorCode === "RESOURCE_EMPTY" || errorCode === "TASK_EXPIRED") {
+              handleQrRetry();
+            }
+          }}
+        />
+      )}
 
       {/* 历史记录弹窗 */}
       {historyModalOpen && (

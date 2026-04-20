@@ -1,4 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { invoke } from "@tauri-apps/api/core";
 
 export interface UpdateInfo {
   version: string;
@@ -8,32 +9,33 @@ export interface UpdateInfo {
   downloadUrl: string;
 }
 
-// 获取当前版本
+// 从 package.json 动态获取当前版本
 export function getCurrentVersion(): string {
-  return "1.0.6";
+  return import.meta.env.PACKAGE_VERSION || "1.0.6";
 }
 
-// 检查更新
+// 检查更新 - 使用 Rust 后端进行 HTTP 请求以绕过 CORS
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
   try {
-    const response = await fetch("https://hhh9201.github.io/Trea-cc/release/latest.json", {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-      },
-    });
-    
-    if (!response.ok) {
-      // 静默失败，不抛出错误
-      console.log("更新服务器返回错误:", response.status);
-      return null;
-    }
-    
-    const data = await response.json();
     const currentVersion = getCurrentVersion();
-    
+    console.log("[Update Check] 当前版本:", currentVersion);
+
+    // 使用 Rust 后端进行 HTTP 请求
+    const data = await invoke<{
+      version: string;
+      notes?: string;
+      pub_date?: string;
+      download_url?: string;
+    }>("check_update_backend");
+
+    console.log("[Update Check] 服务器版本:", data.version);
+    console.log("[Update Check] 服务器返回数据:", JSON.stringify(data, null, 2));
+
     // 比较版本号
-    if (isNewerVersion(data.version, currentVersion)) {
+    const hasUpdate = isNewerVersion(data.version, currentVersion);
+    console.log("[Update Check] 是否有更新:", hasUpdate);
+
+    if (hasUpdate) {
       return {
         version: data.version,
         currentVersion: currentVersion,
@@ -42,11 +44,12 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
         downloadUrl: data.download_url || `https://github.com/HHH9201/Trae-CC/releases/tag/v${data.version}`,
       };
     }
-    
+
     return null;
-  } catch (error) {
-    // 静默失败，只在控制台记录错误
-    console.log("检查更新失败（可能是网络问题）:", error);
+  } catch (error: any) {
+    console.log("[Update Check] 检查更新失败:", error);
+    // 显示详细错误信息
+    alert(`检查更新失败:\n${error.message || error}\n\n请检查网络连接或更新服务器配置。`);
     return null;
   }
 }

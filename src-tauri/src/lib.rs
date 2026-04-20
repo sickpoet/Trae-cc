@@ -6,8 +6,6 @@ mod account;
 mod autostart;
 mod machine;
 mod privacy;
-// mod tempmail_client; // 已禁用，依赖外部 exe 文件
-// mod quick_register_simple; // 已禁用快速注册功能
 mod browser_auto_login;
 mod logger;
 mod custom_tempmail;
@@ -30,7 +28,6 @@ use warp::Filter;
 
 use account::{AccountBrief, AccountManager, Account};
 use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult};
-// use quick_register_simple::wait_for_request_cookies; // 已禁用快速注册功能
 
 #[cfg(target_os = "windows")]
 fn hide_console_window() {
@@ -1673,6 +1670,33 @@ async fn install_update(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// 手动检查更新 - 使用 reqwest 获取 GitHub Pages 上的 latest.json
+#[tauri::command]
+async fn check_update_backend() -> Result<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://hhh9201.github.io/Trea-cc/release/latest.json")
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("请求失败: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(ApiError::from(anyhow::anyhow!(
+            "服务器返回错误: {}",
+            response.status()
+        )));
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("解析 JSON 失败: {}", e)))?;
+
+    Ok(data)
+}
+
 /// 打开购买页面（内置浏览器，携带账号 Cookies）
 #[tauri::command]
 async fn open_pricing(account_id: String, app: AppHandle, state: State<'_, AppState>) -> Result<()> {
@@ -2429,6 +2453,7 @@ pub fn run() {
             get_user_statistics,
             open_pricing,
             check_update,
+            check_update_backend,
             install_update,
             get_logs,
             export_logs_cmd,
