@@ -390,7 +390,11 @@ export function AddAccountModal({
     setLoginStatus("正在打开浏览器...");
 
     try {
-      const account = await api.browserAutoLogin(browserEmail, browserPassword);
+      await api.startBrowserLogin();
+      setLoginProgress(30);
+      setLoginStatus("请在浏览器中完成登录...");
+
+      const account = await api.finishBrowserLogin();
       
       setLoginProgress(100);
       setLoginStatus("登录成功!");
@@ -408,7 +412,12 @@ export function AddAccountModal({
       }, 800);
     } catch (err: any) {
       // 用户关闭浏览器窗口，不显示错误
-      if (err.message === "浏览器窗口已关闭" || err.message === "登录已取消") {
+      if (
+        err.message === "浏览器窗口已关闭" ||
+        err.message === "浏览器被主动关闭" ||
+        err.message === "登录已取消" ||
+        err.message === "浏览器登录已取消"
+      ) {
         setLoading(false);
         setLoginProgress(0);
         setLoginStatus("");
@@ -1076,14 +1085,14 @@ export function AddAccountModal({
                     marginBottom: '8px',
                     letterSpacing: '-0.5px'
                   }}>
-                    扫码快速获取账号
+                    扫码领号
                   </h3>
                   <p style={{
                     fontSize: '14px',
                     color: 'var(--text-secondary)',
                     margin: 0
                   }}>
-                    每次获取1个，每日基础额度2个
+                    每次获取1个，无次数限制
                   </p>
                 </div>
 

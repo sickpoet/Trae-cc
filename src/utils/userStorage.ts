@@ -79,8 +79,7 @@ export function getTodayClaimCount(): number {
  * 获取剩余可领取次数
  */
 export function getRemainingClaims(): number {
-  const todayCount = getTodayClaimCount();
-  return Math.max(0, 2 - todayCount); // 每日限额 2 个
+  return Infinity; // 无限制
 }
 
 /**

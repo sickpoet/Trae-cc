@@ -1,4 +1,3 @@
-import { useState } from "react";
 import type { UpdateInfo } from "../utils/updateChecker";
 
 interface UpdateModalProps {
@@ -9,17 +8,11 @@ interface UpdateModalProps {
 }
 
 export function UpdateModal({ isOpen, updateInfo, onClose, onDownload }: UpdateModalProps) {
-  const [isOpening, setIsOpening] = useState(false);
-
   if (!isOpen || !updateInfo) return null;
 
-  const handleDownload = async () => {
-    setIsOpening(true);
-    try {
-      await onDownload();
-    } catch {
-      setIsOpening(false);
-    }
+  const handleDownload = () => {
+    onDownload();
+    onClose();
   };
 
   return (
@@ -56,25 +49,19 @@ export function UpdateModal({ isOpen, updateInfo, onClose, onDownload }: UpdateM
             </div>
           )}
 
-          {isOpening && (
-            <div className="download-progress">
-              <div className="progress-spinner"></div>
-              <span>正在打开下载页面...</span>
-            </div>
-          )}
+
         </div>
 
         <div className="modal-actions">
-          <button type="button" onClick={onClose} disabled={isOpening}>
+          <button type="button" onClick={onClose}>
             稍后提醒
           </button>
           <button
             type="button"
             className="primary"
             onClick={handleDownload}
-            disabled={isOpening}
           >
-            {isOpening ? "打开中..." : "前往下载"}
+            前往下载
           </button>
         </div>
       </div>

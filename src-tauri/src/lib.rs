@@ -12,6 +12,7 @@ mod custom_tempmail;
 mod quick_register_backend;
 
 use std::collections::HashMap;
+use anyhow::anyhow;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -106,6 +107,7 @@ pub struct AppState {
 
 struct BrowserLoginSession {
     receiver: oneshot::Receiver<(String, String)>,
+    login_complete: oneshot::Receiver<String>,
     shutdown: Arc<StdMutex<Option<oneshot::Sender<()>>>>,
     cancel: oneshot::Receiver<()>,
     window_close: oneshot::Receiver<()>,
@@ -803,6 +805,26 @@ fn build_browser_login_script(port: u16) -> String {
   const markLoginTriggered = () => {
     loginTriggered = true;
   };
+
+  const scanLocalStorage = () => {
+    try {
+      const storages = [localStorage, sessionStorage];
+      storages.forEach(storage => {
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          if (key && (key.toLowerCase().includes("token") || key.toLowerCase().includes("auth") || key.toLowerCase().includes("user"))) {
+            const val = storage.getItem(key);
+            if (val && typeof val === "string" && val.startsWith("ey") && val.split(".").length === 3) {
+              sendToken(val, "storage:" + key);
+            }
+          }
+        }
+      });
+    } catch (e) {}
+  };
+  scanLocalStorage();
+  setInterval(scanLocalStorage, 2000);
+
   const tryFetch = async () => {
     const endpoints = [
       "https://api-sg-central.trae.ai/cloudide/api/v3/common/GetUserToken",
@@ -957,7 +979,10 @@ fn collect_trae_cookies(webview: &WebviewWindow, extra_url: Option<&str>) -> Str
     let mut cookie_map: HashMap<String, String> = HashMap::new();
     let mut urls = vec![
         "https://www.trae.ai/".to_string(),
+        "https://trae.ai/".to_string(),
+        "https://passport.trae.ai/".to_string(),
         "https://api-sg-central.trae.ai/".to_string(),
+        "https://api-us-east.trae.ai/".to_string(),
         "https://ug-normal.trae.ai/".to_string(),
     ];
     
@@ -1004,15 +1029,18 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
         return Err(anyhow::anyhow!("浏览器登录已在进行中").into());
     }
     let (token_tx, token_rx) = oneshot::channel::<(String, String)>();
+    let (login_complete_tx, login_complete_rx) = oneshot::channel::<String>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let (window_close_tx, window_close_rx) = oneshot::channel::<()>();
     let token_sender = Arc::new(StdMutex::new(Some(token_tx)));
+    let login_complete_sender = Arc::new(StdMutex::new(Some(login_complete_tx)));
     let shutdown_sender = Arc::new(StdMutex::new(Some(shutdown_tx)));
     let window_close_sender = Arc::new(StdMutex::new(Some(window_close_tx)));
     let credentials = Arc::new(StdMutex::new(BrowserLoginCredentials::default()));
 
     let token_sender_route = token_sender.clone();
+    let login_complete_sender_route = login_complete_sender.clone();
     let shutdown_sender_route = shutdown_sender.clone();
     let credentials_route = credentials.clone();
     let route = warp::path("callback")
@@ -1047,6 +1075,9 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
                 }
                 warp::reply::html("已收到 Token，可以关闭此页面并返回应用。".to_string())
             } else if state == "logged_in" {
+                if let Some(tx) = login_complete_sender_route.lock().unwrap().take() {
+                    let _ = tx.send(href.clone());
+                }
                 warp::reply::html(format!("检测到登录完成，等待获取 Token。{href}"))
             } else {
                 warp::reply::html("未收到 Token，请重试。".to_string())
@@ -1094,6 +1125,7 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
 
     *browser_login = Some(BrowserLoginSession {
         receiver: token_rx,
+        login_complete: login_complete_rx,
         shutdown: shutdown_sender,
         cancel: cancel_rx,
         window_close: window_close_rx,
@@ -1105,61 +1137,118 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
     Ok(())
 }
 
+async fn try_get_browser_login_token_from_cookies(
+    webview: &WebviewWindow,
+    href: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    let mut last_error = anyhow!("尚未获取到登录 Cookie");
+
+    for _ in 0..8 {
+        let cookies = collect_trae_cookies(webview, href);
+        if !cookies.trim().is_empty() {
+            match TraeApiClient::new(&cookies) {
+                Ok(mut client) => match client.get_user_token().await {
+                    Ok(token_result) => return Ok((token_result.token, cookies)),
+                    Err(err) => last_error = err,
+                },
+                Err(err) => last_error = err,
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(anyhow!("登录已完成，但未能通过 Cookies 获取 Token: {}", last_error))
+}
+
 #[tauri::command]
 async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
-    let session = {
+    let mut session = {
         let mut browser_login = state.browser_login.lock().await;
         browser_login.take().ok_or_else(|| anyhow::anyhow!("浏览器登录未开始"))?
     };
 
-    let (token, _url) = tokio::select! {
-        res = session.receiver => {
-            match res {
-                Ok(token) => token,
-                Err(_) => {
-                    let _ = state.browser_login_cancel.lock().await.take();
-                    if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                        let _ = tx.send(());
+    let mut fallback_cookies: Option<String> = None;
+    let mut logged_in_href: Option<String> = None;
+    let mut login_complete_received = false;
+    let timeout = tokio::time::sleep(Duration::from_secs(300));
+    tokio::pin!(timeout);
+
+    let (token, token_url) = loop {
+        tokio::select! {
+            res = &mut session.receiver => {
+                match res {
+                    Ok(token) => break token,
+                    Err(_) => {
+                        let _ = state.browser_login_cancel.lock().await.take();
+                        if let Some(tx) = session.shutdown.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        let _ = session.webview.close();
+                        let mut browser_login = state.browser_login.lock().await;
+                        *browser_login = None;
+                        return Err(anyhow::anyhow!("浏览器登录已取消").into());
                     }
-                    let _ = session.webview.close();
-                    // 清理 browser_login 状态
-                    let mut browser_login = state.browser_login.lock().await;
-                    *browser_login = None;
-                    return Err(anyhow::anyhow!("浏览器登录已取消").into());
                 }
             }
-        }
-        _ = session.cancel => {
-            let _ = state.browser_login_cancel.lock().await.take();
-            if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                let _ = tx.send(());
+            href = &mut session.login_complete, if !login_complete_received => {
+                login_complete_received = true;
+                logged_in_href = href.ok().filter(|value| !value.trim().is_empty());
+                println!("[browser-login] 检测到网页登录完成，尝试通过 Cookies 获取 Token...");
+
+                match try_get_browser_login_token_from_cookies(&session.webview, logged_in_href.as_deref()).await {
+                    Ok((token, cookies)) => {
+                        println!("[browser-login] 已通过 Cookies 兜底获取 Token");
+                        fallback_cookies = Some(cookies);
+                        break (token, logged_in_href.clone().unwrap_or_default());
+                    }
+                    Err(err) => {
+                        println!("[browser-login] Cookies 兜底获取 Token 失败，将继续等待页面回调: {}", err);
+                    }
+                }
             }
-            let _ = session.webview.close();
-            // 清理 browser_login 状态
-            let mut browser_login = state.browser_login.lock().await;
-            *browser_login = None;
-            return Err(anyhow::anyhow!("浏览器登录已取消").into());
-        }
-        _ = session.window_close => {
-            let _ = state.browser_login_cancel.lock().await.take();
-            if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                let _ = tx.send(());
+            _ = &mut session.cancel => {
+                let _ = state.browser_login_cancel.lock().await.take();
+                if let Some(tx) = session.shutdown.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let _ = session.webview.close();
+                let mut browser_login = state.browser_login.lock().await;
+                *browser_login = None;
+                return Err(anyhow::anyhow!("浏览器登录已取消").into());
             }
-            // 清理 browser_login 状态
-            let mut browser_login = state.browser_login.lock().await;
-            *browser_login = None;
-            return Err(anyhow::anyhow!("浏览器被主动关闭").into());
-        }
-        _ = tokio::time::sleep(Duration::from_secs(300)) => {
-            let _ = state.browser_login_cancel.lock().await.take();
-            if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                let _ = tx.send(());
+            _ = &mut session.window_close => {
+                let _ = state.browser_login_cancel.lock().await.take();
+                if let Some(tx) = session.shutdown.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let mut browser_login = state.browser_login.lock().await;
+                *browser_login = None;
+                return Err(anyhow::anyhow!("浏览器被主动关闭").into());
             }
-            let _ = session.webview.close();
-            // 清理 browser_login 状态
-            let mut browser_login = state.browser_login.lock().await;
-            *browser_login = None;
-            return Err(anyhow::anyhow!("等待浏览器登录超时").into());
+            _ = &mut timeout => {
+                if login_complete_received {
+                    match try_get_browser_login_token_from_cookies(&session.webview, logged_in_href.as_deref()).await {
+                        Ok((token, cookies)) => {
+                            println!("[browser-login] 超时前通过 Cookies 兜底获取 Token 成功");
+                            fallback_cookies = Some(cookies);
+                            break (token, logged_in_href.clone().unwrap_or_default());
+                        }
+                        Err(err) => {
+                            println!("[browser-login] 超时前 Cookies 兜底仍失败: {}", err);
+                        }
+                    }
+                }
+
+                let _ = state.browser_login_cancel.lock().await.take();
+                if let Some(tx) = session.shutdown.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let _ = session.webview.close();
+                let mut browser_login = state.browser_login.lock().await;
+                *browser_login = None;
+                return Err(anyhow::anyhow!("等待浏览器登录超时").into());
+            }
         }
     };
 
@@ -1168,15 +1257,22 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
     }
     let _ = state.browser_login_cancel.lock().await.take();
 
-    // 获取 cookies
-    let cookies = session.webview.cookies()
-        .map(|cookies: Vec<tauri::webview::Cookie>| {
-            cookies.iter()
-                .map(|c| format!("{}={}", c.name(), c.value()))
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
-        .unwrap_or_default();
+    // 获取 cookies，优先使用多域名聚合后的结果
+    let cookies = fallback_cookies.unwrap_or_else(|| {
+        let collected = collect_trae_cookies(&session.webview, Some(&token_url));
+        if !collected.is_empty() {
+            return collected;
+        }
+
+        session.webview.cookies()
+            .map(|cookies: Vec<tauri::webview::Cookie>| {
+                cookies.iter()
+                    .map(|c| format!("{}={}", c.name(), c.value()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default()
+    });
 
     let mut credentials = session.credentials.lock().unwrap().clone();
     if credentials.email.as_deref().unwrap_or("").trim().is_empty()
@@ -1675,7 +1771,7 @@ async fn install_update(app: AppHandle) -> Result<()> {
 async fn check_update_backend() -> Result<serde_json::Value> {
     let client = reqwest::Client::new();
     let response = client
-        .get("https://hhh9201.github.io/Trea-cc/release/latest.json")
+        .get("https://hhh9201.github.io/Trae-cc/release/latest.json")
         .header("Accept", "application/json")
         .timeout(std::time::Duration::from_secs(10))
         .send()

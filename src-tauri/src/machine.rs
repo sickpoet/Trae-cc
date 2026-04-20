@@ -1109,14 +1109,14 @@ pub fn merge_two_accounts_context(current_account_id: &str, target_account_id: &
     let current_backup_dir = proj_dirs.data_dir().join("account_contexts").join(current_account_id);
     let workspace_src = current_backup_dir.join("workspaceStorage");
     
-    let mut total_merged = 0;
+    let mut _total_merged = 0;
     
     // 只合并 workspaceStorage（包含非加密的对话记录）
     // 注意：不合并 state.vscdb，因为它包含加密数据，与特定账号绑定
     if workspace_src.exists() {
         match merge_workspace_storage(&workspace_src, &target_workspace) {
             Ok(count) => {
-                total_merged += count;
+                _total_merged += count;
             }
             Err(_) => {}
         }

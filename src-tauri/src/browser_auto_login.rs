@@ -216,8 +216,9 @@ pub async fn browser_auto_login(
                 try {{
                     var response = await originalFetch.apply(this, arguments);
                     
-                    // 检查所有API响应
-                    if (urlStr.includes('/api/') || urlStr.includes('token') || urlStr.includes('user') || urlStr.includes('login') || urlStr.includes('auth')) {{
+                    // 检查所有API响应 - 扩大匹配范围
+                    if (urlStr.includes('/api/') || urlStr.includes('token') || urlStr.includes('user') || urlStr.includes('login') || urlStr.includes('auth') ||
+                        urlStr.includes('trae') || urlStr.includes('cloudide') || urlStr.includes('passport') || urlStr.includes('GetUser')) {{
                         console.log('[TokenIntercept] 捕获到API请求:', urlStr);
                         try {{
                             var cloned = response.clone();
@@ -229,6 +230,17 @@ pub async fn browser_auto_login(
                             }}
                         }} catch (e) {{}}
                     }}
+                    
+                    // 无论URL是什么，都检查响应中是否包含token
+                    try {{
+                        var cloned = response.clone();
+                        var data = await cloned.json();
+                        var token = parseToken(data);
+                        if (token) {{
+                            console.log('[TokenIntercept] 成功从Fetch响应提取Token:', urlStr);
+                            sendToken(token, urlStr);
+                        }}
+                    }} catch (e) {{}}
                     return response;
                 }} catch (e) {{
                     throw e;
@@ -245,26 +257,26 @@ pub async fn browser_auto_login(
             XMLHttpRequest.prototype.send = function() {{
                 var xhr = this;
                 var url = this._url || '';
-                if (url.includes('/api/') || url.includes('token') || url.includes('user') || url.includes('login') || url.includes('auth')) {{
-                    this.addEventListener('load', function() {{
-                        try {{
-                            var data = JSON.parse(xhr.responseText);
-                            var token = parseToken(data);
-                            if (token) {{
-                                console.log('[TokenIntercept] 成功从XHR提取Token');
-                                sendToken(token, url);
-                            }}
-                        }} catch (e) {{}}
-                    }});
-                }}
+                // 监听所有XHR请求的响应
+                this.addEventListener('load', function() {{
+                    try {{
+                        var data = JSON.parse(xhr.responseText);
+                        var token = parseToken(data);
+                        if (token) {{
+                            console.log('[TokenIntercept] 成功从XHR提取Token:', url);
+                            sendToken(token, url);
+                        }}
+                    }} catch (e) {{}}
+                }});
                 return originalSend.apply(this, arguments);
             }};
             
             // 检查所有存储位置
             var checkAllStorage = function() {{
+                if (window.__trae_last_token) return;
                 console.log('[TokenIntercept] 检查所有存储...');
                 
-                // 检查localStorage
+                // 检查localStorage - 包括所有可能的key
                 try {{
                     for (var i = 0; i < localStorage.length; i++) {{
                         var key = localStorage.key(i);
@@ -274,6 +286,16 @@ pub async fn browser_auto_login(
                             sendToken(value, 'localStorage:' + key);
                             return;
                         }}
+                        // 也检查JSON解析后的值
+                        try {{
+                            var parsed = JSON.parse(value);
+                            var token = parseToken(parsed);
+                            if (token) {{
+                                console.log('[TokenIntercept] 在localStorage(JSON)发现Token, key:', key);
+                                sendToken(token, 'localStorage:' + key);
+                                return;
+                            }}
+                        }} catch(e) {{}}
                     }}
                 }} catch(e) {{}}
                 
@@ -287,6 +309,16 @@ pub async fn browser_auto_login(
                             sendToken(value, 'sessionStorage:' + key);
                             return;
                         }}
+                        // 也检查JSON解析后的值
+                        try {{
+                            var parsed = JSON.parse(value);
+                            var token = parseToken(parsed);
+                            if (token) {{
+                                console.log('[TokenIntercept] 在sessionStorage(JSON)发现Token, key:', key);
+                                sendToken(token, 'sessionStorage:' + key);
+                                return;
+                            }}
+                        }} catch(e) {{}}
                     }}
                 }} catch(e) {{}}
                 
@@ -300,25 +332,65 @@ pub async fn browser_auto_login(
                                 sendToken(value, 'window:' + key);
                                 return;
                             }}
+                            // 也检查对象中的token字段
+                            if (value && typeof value === 'object') {{
+                                var token = parseToken(value);
+                                if (token) {{
+                                    console.log('[TokenIntercept] 在window对象发现Token, key:', key);
+                                    sendToken(token, 'window:' + key);
+                                    return;
+                                }}
+                            }}
                         }} catch(e) {{}}
+                    }}
+                }} catch(e) {{}}
+                
+                // 检查document.cookie
+                try {{
+                    var cookies = document.cookie.split(';');
+                    for (var i = 0; i < cookies.length; i++) {{
+                        var cookie = cookies[i].trim();
+                        var parts = cookie.split('=');
+                        if (parts.length === 2) {{
+                            var value = parts[1];
+                            if (isValidToken(value)) {{
+                                console.log('[TokenIntercept] 在cookie发现Token, key:', parts[0]);
+                                sendToken(value, 'cookie:' + parts[0]);
+                                return;
+                            }}
+                        }}
                     }}
                 }} catch(e) {{}}
             }};
             
+            // 页面加载完成后立即检查
+            if (document.readyState === 'complete' || document.readyState === 'interactive') {{
+                setTimeout(checkAllStorage, 500);
+            }} else {{
+                window.addEventListener('DOMContentLoaded', function() {{
+                    setTimeout(checkAllStorage, 500);
+                }});
+            }}
+            
             // 更频繁地检查
+            setTimeout(checkAllStorage, 1000);
             setTimeout(checkAllStorage, 2000);
+            setTimeout(checkAllStorage, 3000);
             setTimeout(checkAllStorage, 5000);
+            setTimeout(checkAllStorage, 8000);
             setTimeout(checkAllStorage, 10000);
             setTimeout(checkAllStorage, 15000);
             setTimeout(checkAllStorage, 20000);
             setTimeout(checkAllStorage, 30000);
+            setTimeout(checkAllStorage, 45000);
+            setTimeout(checkAllStorage, 60000);
             
             // 持续检查
             setInterval(function() {{
                 if (!window.__trae_last_token) {{
                     checkAllStorage();
                 }}
-            }}, 3000);
+            }}, 2000);
             
             console.log('[TokenIntercept] Token 拦截器已安装，等待登录...');
         }})();
@@ -355,7 +427,7 @@ pub async fn browser_auto_login(
     let window_close_tx = Arc::new(StdMutex::new(Some(window_close_tx)));
     
     // 监听窗口关闭事件
-    let webview_clone = webview.clone();
+    let _webview_clone = webview.clone();
     let window_close_tx_clone = window_close_tx.clone();
     webview.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { .. } = event {
@@ -366,13 +438,20 @@ pub async fn browser_auto_login(
         }
     });
 
-    // 等待 token、取消信号或窗口关闭
+    // 创建超时通道（90秒超时）
+    let (timeout_tx, mut timeout_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(90)).await;
+        let _ = timeout_tx.send(());
+    });
+
+    // 等待 token、取消信号、窗口关闭或超时
     let result = tokio::select! {
         res = token_rx => {
             match res {
                 Ok((token, _url)) => {
                     println!("[browser-auto-login] 成功获取 Token");
-                    Ok(token)
+                    Ok(Some(token))
                 }
                 Err(_) => Err(anyhow!("Token 接收失败")),
             }
@@ -385,6 +464,10 @@ pub async fn browser_auto_login(
         _ = &mut window_close_rx => {
             println!("[browser-auto-login] 浏览器窗口已关闭");
             Err(anyhow!("浏览器窗口已关闭"))
+        }
+        _ = &mut timeout_rx => {
+            println!("[browser-auto-login] 等待超时，尝试备用方案...");
+            Ok(None) // 超时，返回None表示需要尝试备用方案
         }
     };
 
@@ -399,7 +482,7 @@ pub async fn browser_auto_login(
         *cancel_guard = None;
     }
 
-    let token = result?;
+    let token_option = result?;
 
     // 获取 Cookies
     println!("[browser-auto-login] 正在获取 Cookies...");
@@ -409,10 +492,33 @@ pub async fn browser_auto_login(
         .map(|c| format!("{}={}", c.name(), c.value()))
         .collect::<Vec<_>>()
         .join("; ");
-    println!("[browser-auto-login] 获取到 Cookies");
+    println!("[browser-auto-login] 获取到 Cookies (长度: {})", cookies_str.len());
 
     // 关闭窗口
     let _ = webview.destroy();
+
+    // 处理 token
+    let token = match token_option {
+        Some(t) => {
+            println!("[browser-auto-login] 从拦截器获取到 Token");
+            t
+        }
+        None => {
+            // 备用方案：使用 cookies 调用 API 获取 token
+            println!("[browser-auto-login] 使用备用方案：通过 Cookies 获取 Token...");
+            
+            if cookies_str.is_empty() {
+                return Err(anyhow!("无法获取 Cookies，登录失败"));
+            }
+            
+            // 使用 cookies 创建客户端并获取 token
+            let mut client = TraeApiClient::new(&cookies_str)?;
+            let token_result = client.get_user_token().await?;
+            
+            println!("[browser-auto-login] 通过 API 成功获取 Token");
+            token_result.token
+        }
+    };
 
     // 调试：打印 token 信息
     println!("[browser-auto-login] Token 长度: {}", token.len());

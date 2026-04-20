@@ -115,7 +115,14 @@ impl TraeApiClient {
         let jwt_data = Self::parse_jwt_token(token)?;
 
         let headers = self.build_headers_token_only()?;
-        let endpoints = [&self.api_base, API_BASE_SG, API_BASE_US];
+        let endpoints = [
+            &self.api_base, 
+            "https://ug-normal.trae.ai",
+            "https://api-sg-central.trae.ai", 
+            "https://api-us-east.trae.ai",
+            "https://ug-normal.sg.trae.ai",
+            "https://ug-normal.us.trae.ai",
+        ];
 
         let mut last_error = anyhow!("所有 API 端点都失败");
 
@@ -310,9 +317,11 @@ impl TraeApiClient {
         // 所有端点按优先级排序
         let endpoints = vec![
             (self.api_base.as_str(), "Primary"),
-            (API_BASE_SG, "SG"),
-            (API_BASE_US, "US"),
-            (API_BASE_UG, "UG"),
+            ("https://ug-normal.trae.ai", "UG-Global"),
+            ("https://api-sg-central.trae.ai", "SG"),
+            ("https://api-us-east.trae.ai", "US"),
+            ("https://ug-normal.sg.trae.ai", "UG-SG"),
+            ("https://ug-normal.us.trae.ai", "UG-US"),
         ];
         
         let mut last_error = anyhow!("所有端点都失败");

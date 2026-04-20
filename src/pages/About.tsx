@@ -182,13 +182,13 @@ export function About({ onToast }: AboutProps) {
           
           <div className="about-info">
             <a 
-              href="https://github.com/HHH9201/Trae-CC.git" 
+              href="https://github.com/HHH9201/Trae-cc.git" 
               target="_blank" 
               rel="noopener noreferrer"
               className="github-link"
             >
               <span className="label">GitHub</span>
-              <span className="value">HHH9201/Trae-CC</span>
+              <span className="value">HHH9201/Trae-cc</span>
             </a>
           </div>
         </div>

@@ -41,7 +41,7 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
         currentVersion: currentVersion,
         notes: data.notes || "",
         date: data.pub_date || "",
-        downloadUrl: data.download_url || `https://github.com/HHH9201/Trae-CC/releases/tag/v${data.version}`,
+        downloadUrl: data.download_url || `https://github.com/HHH9201/Trae-cc/releases/tag/v${data.version}`,
       };
     }
 
