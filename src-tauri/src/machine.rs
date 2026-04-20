@@ -190,22 +190,39 @@ pub fn kill_trae() -> Result<()> {
         }
     }
 
-    // 等待进程完全退出（轮询检查，最多等待5秒）
+    // 等待进程完全退出（轮询检查，最多等待8秒，增加鲁棒性）
     let start = std::time::Instant::now();
-    let timeout = std::time::Duration::from_secs(5);
+    let timeout = std::time::Duration::from_secs(8);
     
     while is_trae_running() && start.elapsed() < timeout {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
     if is_trae_running() {
-        return Err(anyhow!("无法完全关闭 Trae IDE，请手动关闭后重试"));
+        return Err(anyhow!("无法完全关闭 Trae IDE，请手动关闭后重试（可能存在残留子进程）"));
     }
 
-    // 额外等待一段时间确保资源释放
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    // 关键加固：确保 User Data 目录下的锁定文件已释放
+    let trae_path = get_trae_data_path()?;
+    let lock_file = trae_path.join("User").join("globalStorage").join("state.vscdb");
+    
+    // 如果数据库文件依然存在，尝试等待它可写（意味着锁已释放）
+    if lock_file.exists() {
+        let mut retry = 0;
+        while retry < 5 {
+            if let Ok(file) = fs::OpenOptions::new().write(true).open(&lock_file) {
+                drop(file);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            retry += 1;
+        }
+    }
 
-    println!("[INFO] Trae IDE 已完全关闭");
+    // 额外等待一段时间确保 OS 级句柄完全释放
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    println!("[INFO] Trae IDE 已安全关闭并释放文件锁");
     Ok(())
 }
 
@@ -728,19 +745,26 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     obj.insert("telemetry.machineId".to_string(), serde_json::json!(new_telemetry_machine_id));
     obj.insert("telemetry.sqmId".to_string(), serde_json::json!(new_sqm_id));
 
-    // 写回文件
+    // 原子化写入：先写临时文件再重命名，防止文件损坏
     let new_content = serde_json::to_string_pretty(&json)
         .map_err(|e| anyhow!("序列化 JSON 失败: {}", e))?;
-    fs::write(&storage_path, new_content)
-        .map_err(|e| anyhow!("写入 storage.json 失败: {}", e))?;
+    let temp_storage_path = storage_path.with_extension("tmp");
+    fs::write(&temp_storage_path, &new_content)
+        .map_err(|e| anyhow!("写入临时配置文件失败: {}", e))?;
+    fs::rename(&temp_storage_path, &storage_path)
+        .map_err(|e| anyhow!("应用配置文件失败 (rename): {}", e))?;
 
     // 11. 写入新的登录信息
     write_trae_login_info(info)?;
 
     println!("[INFO] 已切换 Trae IDE 到账号: {}", info.email);
+    
+    // 给文件系统一点点同步时间
+    std::thread::sleep(std::time::Duration::from_millis(300));
 
     // 12. 自动打开 Trae IDE（仅在需要时）
     if auto_start {
+        println!("[INFO] 正在启动 Trae IDE...");
         if let Err(e) = open_trae() {
             println!("[WARN] 自动打开 Trae IDE 失败: {}", e);
         }

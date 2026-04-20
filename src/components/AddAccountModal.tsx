@@ -86,8 +86,6 @@ export function AddAccountModal({
   // 浏览器登录表单状态
   const [loginProgress, setLoginProgress] = useState(0);
   const [loginStatus, setLoginStatus] = useState("");
-  const [browserEmail, setBrowserEmail] = useState("");
-  const [browserPassword, setBrowserPassword] = useState("");
   
   // 快速注册进度状态
   const [registerProgress, setRegisterProgress] = useState(0);
@@ -106,6 +104,7 @@ export function AddAccountModal({
   const [availableCount, setAvailableCount] = useState<number | null>(null);
   const [lastRefreshTime, setLastRefreshTime] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [totalUsers, setTotalUsers] = useState<number | null>(null);
 
   // 用户信息
   const [, setUserInfo] = useState<StoredUserInfo | null>(null);
@@ -148,10 +147,11 @@ export function AddAccountModal({
     };
   }, []);
 
-  // 打开模态框时自动获取剩余账号数量
+  // 打开模态框时自动获取统计信息
   useEffect(() => {
     if (isOpen) {
       void fetchStats(true);
+      void fetchTodayAnalytics();
     }
   }, [isOpen]);
 
@@ -405,8 +405,6 @@ export function AddAccountModal({
         setLoading(false);
         setLoginProgress(0);
         setLoginStatus("");
-        setBrowserEmail("");
-        setBrowserPassword("");
         onClose();
         onToast?.("success", `登录成功，已导入账号: ${account.email}`);
       }, 800);
@@ -474,6 +472,18 @@ export function AddAccountModal({
       console.error("获取统计失败:", err);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  // 获取今日新用户统计
+  const fetchTodayAnalytics = async () => {
+    try {
+      const response = await api.getTodayAnalytics();
+      if (response.success) {
+        setTotalUsers(response.data.cumulative_since_0420);
+      }
+    } catch (err) {
+      console.error("获取统计数据失败:", err);
     }
   };
 
@@ -741,8 +751,6 @@ export function AddAccountModal({
     setMode("quick-register");
     setLoginProgress(0);
     setLoginStatus("");
-    setBrowserEmail("");
-    setBrowserPassword("");
     stopProgressSimulation();
     resetQrState();
     void api.cancelBrowserLogin();
@@ -1076,24 +1084,84 @@ export function AddAccountModal({
             {/* 初始步骤 */}
             {qrStep === "initial" && (
               <div className="step-content" style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                {/* 标题区域 */}
-                <div style={{ textAlign: 'center', marginBottom: '8px' }}>
-                  <h3 style={{
-                    fontSize: '22px',
-                    fontWeight: 700,
-                    color: 'var(--text-primary)',
-                    marginBottom: '8px',
-                    letterSpacing: '-0.5px'
-                  }}>
-                    扫码领号
-                  </h3>
-                  <p style={{
-                    fontSize: '14px',
-                    color: 'var(--text-secondary)',
-                    margin: 0
-                  }}>
-                    每次获取1个，无次数限制
-                  </p>
+                {/* 极简高级感倒计时 */}
+                <div style={{ textAlign: 'center', marginBottom: '24px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                  {totalUsers !== null && (
+                    <div style={{ 
+                      marginBottom: '16px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      gap: '4px'
+                    }}>
+                      <div style={{ 
+                          display: 'flex', 
+                          alignItems: 'baseline', 
+                          gap: '6px',
+                          color: '#475569',
+                          fontSize: '14px',
+                          fontWeight: 500
+                        }}>
+                          <span>距离开启</span>
+                           <span style={{ 
+                              color: '#fff', 
+                              fontWeight: 900, 
+                              fontSize: '15px',
+                              padding: '4px 12px',
+                              background: 'linear-gradient(-45deg, #f43f5e, #8b5cf6, #3b82f6, #10b981, #f59e0b)',
+                              backgroundSize: '400% 400%',
+                              borderRadius: '12px',
+                              letterSpacing: '1px',
+                              animation: 'disco 3s ease infinite, pulse 0.8s ease-in-out infinite, disco-text 0.8s ease-in-out infinite',
+                              display: 'inline-block',
+                              marginLeft: '4px',
+                              textShadow: '0 0 10px rgba(255, 255, 255, 0.8)',
+                              border: '2px solid rgba(255, 255, 255, 0.3)'
+                            }}>无次数限制领取</span>
+                         </div>
+                      
+                      <div style={{ 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        gap: '8px',
+                        marginTop: '4px'
+                      }}>
+                        <span style={{ color: '#94a3b8', fontSize: '13px' }}>目前还差</span>
+                        <span style={{ 
+                          fontSize: '32px', 
+                          fontWeight: 900, 
+                          color: '#1e293b',
+                          fontFamily: 'system-ui, -apple-system, sans-serif',
+                          lineHeight: 1,
+                          background: 'linear-gradient(180deg, #1e293b 0%, #475569 100%)',
+                          WebkitBackgroundClip: 'text',
+                          WebkitTextFillColor: 'transparent',
+                        }}>
+                          {Math.max(0, 100 - totalUsers)}
+                        </span>
+                        <span style={{ color: '#1e293b', fontSize: '15px', fontWeight: 600 }}>位新伙伴</span>
+                      </div>
+
+                      {/* 进度条效果 */}
+                      <div style={{ 
+                        width: '200px', 
+                        height: '4px', 
+                        background: '#f1f5f9', 
+                        borderRadius: '2px', 
+                        marginTop: '12px',
+                        overflow: 'hidden',
+                        position: 'relative'
+                      }}>
+                        <div style={{ 
+                          width: `${Math.min(100, (totalUsers / 100) * 100)}%`, 
+                          height: '100%', 
+                          background: 'linear-gradient(90deg, #fb7185 0%, #f43f5e 100%)',
+                          borderRadius: '2px',
+                          transition: 'width 1s cubic-bezier(0.4, 0, 0.2, 1)'
+                        }} />
+                      </div>
+                    </div>
+                  )}
                 </div>
 
 
@@ -1154,7 +1222,7 @@ export function AddAccountModal({
                         每日限额
                       </div>
                       <div style={{ fontSize: '13px', color: '#64748b' }}>
-                        每日基础额度2个，邀请好友可获额外奖励
+                        每日基础额度2个，邀请一个新用户每日上限+1
                       </div>
                     </div>
                   </div>

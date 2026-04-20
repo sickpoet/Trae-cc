@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::types::*;
-use crate::api::{TraeApiClient, UsageSummary, UsageQueryResponse, login_with_email};
+use crate::api::{TraeApiClient, UsageSummary, UsageQueryResponse, login_with_email, TokenUserInfo};
 
 /// 账号管理器
 pub struct AccountManager {
@@ -73,7 +73,22 @@ impl AccountManager {
     /// 保存账号存储
     fn save_store(&self) -> Result<()> {
         let content = serde_json::to_string_pretty(&self.store)?;
-        fs::write(&self.data_path, content)?;
+        
+        // 如果文件已存在，先读取并比较，避免无谓的写入和日志
+        if self.data_path.exists() {
+            if let Ok(existing) = fs::read_to_string(&self.data_path) {
+                if existing == content {
+                    return Ok(());
+                }
+            }
+        }
+
+        println!("[AccountManager] 正在保存账号存储到: {:?}", self.data_path);
+        fs::write(&self.data_path, content).map_err(|e| {
+            println!("[AccountManager] ❌ 保存失败: {}", e);
+            anyhow!("无法写入账号数据文件: {}", e)
+        })?;
+        println!("[AccountManager] ✅ 账号存储保存成功");
         Ok(())
     }
 
@@ -209,6 +224,7 @@ impl AccountManager {
     /// 如果账号已存在，则更新账号信息
     /// 如果 Token 不是 JWT 格式，会尝试使用 Cookies 添加账号
     pub async fn add_account_by_token(&mut self, token: String, cookies: Option<String>, password: Option<String>) -> Result<Account> {
+        println!("[AccountManager] 开始 add_account_by_token, token 长度: {}", token.len());
         // 检查 Token 是否是 JWT 格式（包含两个点号）
         let is_jwt = token.split('.').count() == 3;
         
@@ -216,6 +232,7 @@ impl AccountManager {
             // 尝试使用 Cookies 添加账号
             if let Some(ref cookies_str) = cookies {
                 if !cookies_str.is_empty() {
+                    println!("[AccountManager] Token 不是 JWT，尝试使用 Cookies 添加");
                     return self.add_account(cookies_str.clone(), password).await;
                 }
             }
@@ -224,8 +241,26 @@ impl AccountManager {
         
         let client = TraeApiClient::new_with_token(&token)?;
 
-        // 通过 Token 获取用户信息
-        let user_info = client.get_user_info_by_token().await?;
+        // 通过 Token 获取用户信息，增加容错和日志
+        let user_info = match client.get_user_info_by_token().await {
+            Ok(info) => {
+                println!("[AccountManager] ✅ API 成功获取用户信息: {}", info.user_id);
+                info
+            },
+            Err(err) => {
+                println!("[AccountManager] ⚠️ API 获取用户信息失败 (可能是 401), 使用 Token 强制解析: {}", err);
+                let jwt = TraeApiClient::parse_jwt_token(&token)?;
+                TokenUserInfo {
+                    user_id: jwt.user_id,
+                    tenant_id: jwt.tenant_id,
+                    screen_name: None,
+                    avatar_url: None,
+                    email: None,
+                }
+            }
+        };
+
+        println!("[AccountManager] 目标用户 ID: {}", user_info.user_id);
 
         // 检查是否已存在
         let existing_index = self
@@ -239,18 +274,24 @@ impl AccountManager {
             println!("[AccountManager] 账号已存在，更新信息: user_id={}", user_info.user_id);
             
             // 如果提供了 Cookies，尝试获取更详细的用户信息
-            let (name, email, avatar_url) = if let Some(ref cookies_str) = cookies {
+            let (name, email, avatar_url): (String, String, String) = if let Some(ref cookies_str) = cookies {
                 match self.get_user_info_with_cookies(cookies_str).await {
-                    Ok(info) => (
-                        info.screen_name,
-                        info.non_plain_text_email.unwrap_or_default(),
-                        info.avatar_url,
-                    ),
-                    Err(_) => (
-                        user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
-                        user_info.email.clone().unwrap_or_default(),
-                        user_info.avatar_url.clone().unwrap_or_default(),
-                    ),
+                    Ok(info) => {
+                        println!("[AccountManager] ✅ Cookies 成功获取详情");
+                        (
+                            info.screen_name,
+                            info.non_plain_text_email.unwrap_or_default(),
+                            info.avatar_url,
+                        )
+                    },
+                    Err(_) => {
+                        println!("[AccountManager] ⚠️ Cookies 获取详情失败，使用 Token 数据");
+                        (
+                            user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                            user_info.email.clone().unwrap_or_default(),
+                            user_info.avatar_url.clone().unwrap_or_default(),
+                        )
+                    },
                 }
             } else {
                 (
@@ -287,22 +328,30 @@ impl AccountManager {
             }
             
             self.save_store()?;
+            println!("[AccountManager] ✅ 现有账号信息更新成功");
             return Ok(self.store.accounts[index].clone());
         }
 
+        println!("[AccountManager] 创建新账号: user_id={}", user_info.user_id);
         // 如果提供了 Cookies，尝试获取更详细的用户信息
-        let (name, email, avatar_url) = if let Some(ref cookies_str) = cookies {
+        let (name, email, avatar_url): (String, String, String) = if let Some(ref cookies_str) = cookies {
             match self.get_user_info_with_cookies(cookies_str).await {
-                Ok(info) => (
-                    info.screen_name,
-                    info.non_plain_text_email.unwrap_or_default(),
-                    info.avatar_url,
-                ),
-                Err(_) => (
-                    user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
-                    user_info.email.unwrap_or_default(),
-                    user_info.avatar_url.unwrap_or_default(),
-                ),
+                Ok(info) => {
+                    println!("[AccountManager] ✅ Cookies 成功获取详情");
+                    (
+                        info.screen_name,
+                        info.non_plain_text_email.unwrap_or_default(),
+                        info.avatar_url,
+                    )
+                },
+                Err(_) => {
+                    println!("[AccountManager] ⚠️ Cookies 获取详情失败，使用 Token 数据");
+                    (
+                        user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                        user_info.email.unwrap_or_default(),
+                        user_info.avatar_url.unwrap_or_default(),
+                    )
+                },
             }
         } else {
             (
@@ -329,10 +378,12 @@ impl AccountManager {
 
         // 如果是第一个账号，设为活跃账号
         if self.store.active_account_id.is_none() {
+            println!("[AccountManager] 设为首个活跃账号: {}", account.id);
             self.store.active_account_id = Some(account.id.clone());
         }
 
         self.save_store()?;
+        println!("[AccountManager] ✅ 新账号添加成功: {}", account.id);
         Ok(account)
     }
 
@@ -343,8 +394,26 @@ impl AccountManager {
         cookies: Option<String>,
         password: Option<String>,
     ) -> Result<Account> {
+        println!("[AccountManager] 开始 upsert_account_by_token, token 长度: {}", token.len());
         let client = TraeApiClient::new_with_token(&token)?;
-        let user_info = client.get_user_info_by_token().await?;
+        
+        // 尝试获取用户信息，如果失败则使用 JWT 兜底
+        let user_info = match client.get_user_info_by_token().await {
+            Ok(info) => info,
+            Err(err) => {
+                println!("[AccountManager] API 获取用户信息失败，使用 Token 强制解析: {}", err);
+                let jwt = TraeApiClient::parse_jwt_token(&token)?;
+                TokenUserInfo {
+                    user_id: jwt.user_id,
+                    tenant_id: jwt.tenant_id,
+                    screen_name: None,
+                    avatar_url: None,
+                    email: None,
+                }
+            }
+        };
+
+        println!("[AccountManager] 目标用户 ID: {}", user_info.user_id);
 
         if let Some(existing_id) = self
             .store
@@ -353,23 +422,30 @@ impl AccountManager {
             .find(|a| a.user_id == user_info.user_id)
             .map(|a| a.id.clone())
         {
+            println!("[AccountManager] 更新现有账号: {}", existing_id);
             // 先准备刷新账号信息（优先使用 cookies）
-            let (name, email, avatar_url, region, tenant_id) = if let Some(ref cookies_str) = cookies {
+            let (name, email, avatar_url, region, tenant_id): (String, String, String, String, String) = if let Some(ref cookies_str) = cookies {
                 match self.get_user_info_with_cookies(cookies_str).await {
-                    Ok(info) => (
-                        info.screen_name,
-                        info.non_plain_text_email.unwrap_or_default(),
-                        info.avatar_url,
-                        info.region,
-                        info.tenant_id,
-                    ),
-                    Err(_) => (
-                        user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
-                        user_info.email.clone().unwrap_or_default(),
-                        user_info.avatar_url.clone().unwrap_or_default(),
-                        String::new(),
-                        user_info.tenant_id.clone(),
-                    ),
+                    Ok(info) => {
+                        println!("[AccountManager] ✅ Cookies 成功获取详情");
+                        (
+                            info.screen_name,
+                            info.non_plain_text_email.unwrap_or_default(),
+                            info.avatar_url,
+                            info.region,
+                            info.tenant_id,
+                        )
+                    },
+                    Err(_) => {
+                        println!("[AccountManager] ⚠️ Cookies 获取详情失败，使用 Token 数据");
+                        (
+                            user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                            user_info.email.clone().unwrap_or_default(),
+                            user_info.avatar_url.clone().unwrap_or_default(),
+                            String::new(),
+                            user_info.tenant_id.clone(),
+                        )
+                    },
                 }
             } else {
                 (
@@ -382,6 +458,7 @@ impl AccountManager {
             };
 
             let updated = if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == existing_id) {
+                println!("[AccountManager] 正在写入账号字段: {}", existing_id);
                 acc.jwt_token = Some(token.clone());
                 acc.token_expired_at = None;
                 if let Some(cookie_str) = cookies.as_ref().filter(|v| !v.is_empty()) {
@@ -409,16 +486,24 @@ impl AccountManager {
                 acc.updated_at = chrono::Utc::now().timestamp();
                 Some(acc.clone())
             } else {
+                println!("[AccountManager] ❌ 严重错误：在更新过程中找不到账号 ID {}", existing_id);
                 None
             };
 
             if let Some(updated) = updated {
                 self.save_store()?;
+                println!("[AccountManager] ✅ 现有账号更新成功并保存");
                 return Ok(updated);
             }
         }
 
-        self.add_account_by_token(token, cookies, password).await
+        println!("[AccountManager] 准备添加新账号");
+        let result = self.add_account_by_token(token, cookies, password).await;
+        match &result {
+            Ok(acc) => println!("[AccountManager] ✅ 新账号添加成功: {}", acc.id),
+            Err(e) => println!("[AccountManager] ❌ 新账号添加失败: {}", e),
+        }
+        result
     }
 
     /// 使用 Cookies 获取用户信息
@@ -755,11 +840,18 @@ impl AccountManager {
         };
 
         // 更新账号的 plan_type
+        let mut changed = false;
         if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account_id) {
-            acc.plan_type = summary.plan_type.clone();
-            acc.updated_at = chrono::Utc::now().timestamp();
+            if acc.plan_type != summary.plan_type {
+                acc.plan_type = summary.plan_type.clone();
+                acc.updated_at = chrono::Utc::now().timestamp();
+                changed = true;
+            }
         }
-        self.save_store()?;
+        
+        if changed {
+            self.save_store()?;
+        }
 
         Ok(summary)
     }

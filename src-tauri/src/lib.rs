@@ -1766,31 +1766,69 @@ async fn install_update(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
-/// 手动检查更新 - 使用 reqwest 获取 GitHub Pages 上的 latest.json
+/// 手动检查更新 - 使用 reqwest 获取最新版本信息，支持多镜像重试
 #[tauri::command]
 async fn check_update_backend() -> Result<serde_json::Value> {
-    let client = reqwest::Client::new();
-    let response = client
-        .get("https://hhh9201.github.io/Trae-cc/release/latest.json")
-        .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| ApiError::from(anyhow::anyhow!("请求失败: {}", e)))?;
+    // 增加 User-Agent 伪装，防止被镜像站拦截
+    let user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Trae-cc-Client/1.0";
+    
+    let client = reqwest::Client::builder()
+        .user_agent(user_agent)
+        .timeout(std::time::Duration::from_secs(12)) // 略微增加超时
+        .build()
+        .map_err(|e| ApiError::from(anyhow::anyhow!("创建 HTTP 客户端失败: {}", e)))?;
 
-    if !response.status().is_success() {
-        return Err(ApiError::from(anyhow::anyhow!(
-            "服务器返回错误: {}",
-            response.status()
-        )));
+    let endpoints = [
+        "https://hhh9201.github.io/Trae-cc/release/latest.json",
+        "https://raw.gitmirror.com/HHH9201/Trae-cc/main/release/latest.json",
+        "https://raw.fgit.cf/HHH9201/Trae-cc/main/release/latest.json",
+        "https://raw.githubusercontent.com/HHH9201/Trae-cc/main/release/latest.json",
+        "https://mirror.ghproxy.com/https://raw.githubusercontent.com/HHH9201/Trae-cc/main/release/latest.json",
+    ];
+
+    let mut last_error_msg = String::from("所有更新服务器均无法访问");
+
+    for url in endpoints.iter() {
+        println!("[Update] 正在尝试从 {} 检查更新...", url);
+        let response = client
+            .get(*url)
+            .header("Accept", "application/json")
+            .header("Cache-Control", "no-cache") // 禁用缓存
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        println!("[Update] ✅ 成功从 {} 获取更新信息", url);
+                        return Ok(data);
+                    }
+                    Err(e) => {
+                        println!("[Update] ❌ 解析 JSON 失败 ({}): {}", url, e);
+                        last_error_msg = format!("解析数据失败: {}", e);
+                    }
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                println!("[Update] ⚠️ 服务器返回状态码 {}: {}", status, url);
+                last_error_msg = format!("服务器返回错误: {}", status);
+            }
+            Err(e) => {
+                // 打印更详细的错误原因
+                let err_type = if e.is_timeout() { "超时" } 
+                               else if e.is_connect() { "连接失败" }
+                               else if e.is_request() { "请求构造错误" }
+                               else { "未知网络错误" };
+                
+                println!("[Update] ⚠️ {} ({}): {}", err_type, url, e);
+                last_error_msg = format!("网络{}: {}", err_type, e);
+            }
+        }
     }
 
-    let data: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| ApiError::from(anyhow::anyhow!("解析 JSON 失败: {}", e)))?;
-
-    Ok(data)
+    Err(ApiError::from(anyhow::anyhow!("{}", last_error_msg)))
 }
 
 /// 打开购买页面（内置浏览器，携带账号 Cookies）
@@ -2565,6 +2603,7 @@ pub fn run() {
             quick_register_backend::exchange_pc_token,
             quick_register_backend::get_user_info,
             quick_register_backend::claim_resource_with_token,
+            quick_register_backend::get_today_analytics,
         ])
         .setup(|app| {
             // 获取主窗口并显示

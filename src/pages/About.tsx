@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { checkForUpdate, getCurrentVersion, openDownloadPage } from "../utils/updateChecker";
 import { UpdateModal } from "../components/UpdateModal";
 import type { UpdateInfo } from "../utils/updateChecker";
@@ -55,6 +56,7 @@ export function About({ onToast }: AboutProps) {
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [lastCheckTime, setLastCheckTime] = useState(0);
 
   // 处理赞助按钮点击
   const handleSponsorClick = (type: string) => {
@@ -103,9 +105,18 @@ export function About({ onToast }: AboutProps) {
 
   // 检查更新
   const handleCheckUpdate = async () => {
+    // 增加冷却时间限制（30秒）
+    const now = Date.now();
+    if (now - lastCheckTime < 30000) {
+      const remaining = Math.ceil((30000 - (now - lastCheckTime)) / 1000);
+      onToast?.("warning", `检查更新过于频繁，请 ${remaining} 秒后再试`, 2000);
+      return;
+    }
+
     setIsCheckingUpdate(true);
     try {
       const update = await checkForUpdate();
+      setLastCheckTime(Date.now());
       
       if (update) {
         setUpdateInfo(update);
@@ -113,6 +124,9 @@ export function About({ onToast }: AboutProps) {
       } else {
         onToast?.("success", "当前已是最新版本", 2000);
       }
+    } catch (error) {
+      setLastCheckTime(Date.now());
+      // 错误由 updateChecker.ts 处理
     } finally {
       setIsCheckingUpdate(false);
     }
@@ -169,27 +183,25 @@ export function About({ onToast }: AboutProps) {
         <div className="about-intro-section">
           <p className="about-desc">
             这是一款专为 Trae IDE 用户打造的多账号高效管理工具。通过本工具，您可以轻松管理多个 Trae 账号，一键切换账号，实时查看使用量，让您的 Trae IDE 使用体验更加便捷！基于
-            <a
-              href="https://github.com/S-Trespassing/Trae账号管理"
-              target="_blank"
-              rel="noopener noreferrer"
+            <span
+              onClick={() => openUrl("https://github.com/S-Trespassing/Trae账号管理")}
               className="original-link"
+              style={{ cursor: 'pointer', textDecoration: 'underline' }}
             >
               原作者项目
-            </a>
+            </span>
             进行二次开发，原作者已不再维护。
           </p>
           
           <div className="about-info">
-            <a 
-              href="https://github.com/HHH9201/Trae-cc.git" 
-              target="_blank" 
-              rel="noopener noreferrer"
+            <div 
+              onClick={() => openUrl("https://github.com/HHH9201/Trae-cc.git")}
               className="github-link"
+              style={{ cursor: 'pointer' }}
             >
               <span className="label">GitHub</span>
               <span className="value">HHH9201/Trae-cc</span>
-            </a>
+            </div>
           </div>
         </div>
 
@@ -214,17 +226,16 @@ export function About({ onToast }: AboutProps) {
               {icons.qrcode}
               复制群号
             </button>
-            <a
-              href="http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=894356872"
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              onClick={() => openUrl("http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=894356872")}
               className="about-support-btn qq"
+              style={{ cursor: 'pointer', border: 'none', background: 'none' }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15h-2v-2h2v2zm0-4h-2V7h2v6zm4 4h-2v-2h2v2zm0-4h-2V7h2v6z"/>
               </svg>
               加入 QQ 群
-            </a>
+            </button>
           </div>
         </div>
 

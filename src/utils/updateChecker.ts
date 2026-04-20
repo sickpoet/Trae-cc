@@ -11,7 +11,7 @@ export interface UpdateInfo {
 
 // 从 package.json 动态获取当前版本
 export function getCurrentVersion(): string {
-  return import.meta.env.PACKAGE_VERSION || "1.0.6";
+  return import.meta.env.PACKAGE_VERSION || "1.0.7";
 }
 
 // 检查更新 - 使用 Rust 后端进行 HTTP 请求以绕过 CORS
@@ -49,7 +49,11 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   } catch (error: any) {
     console.log("[Update Check] 检查更新失败:", error);
     // 显示详细错误信息
-    alert(`检查更新失败:\n${error.message || error}\n\n请检查网络连接或更新服务器配置。`);
+    alert(
+      `检查更新失败:\n${
+        error.message || error
+      }\n\n请检查网络连接。如果持续失败，您可以访问 GitHub Releases 页面手动下载最新版本：\nhttps://github.com/HHH9201/Trae-cc/releases`
+    );
     return null;
   }
 }

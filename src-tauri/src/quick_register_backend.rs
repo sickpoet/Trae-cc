@@ -305,6 +305,61 @@ pub struct ClaimResourceNewResponse {
     pub code: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TodayAnalyticsResponse {
+    pub success: bool,
+    pub data: TodayAnalyticsData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TodayAnalyticsData {
+    pub today_new_users: i32,
+    pub cumulative_since_0420: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TotalAnalyticsResponse {
+    pub success: bool,
+    pub data: TotalAnalyticsData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TotalAnalyticsData {
+    pub total_users: i32,
+}
+
+// 获取今日新用户统计
+#[tauri::command]
+pub async fn get_today_analytics() -> Result<TodayAnalyticsResponse, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let url = format!("{}/api/analytics/today_new_users", *QUICK_REGISTER_API_BASE);
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!("服务器错误 ({}): {}", status, text));
+    }
+
+    let result: TodayAnalyticsResponse = serde_json::from_str(&text)
+        .map_err(|e| format!("解析响应失败: {}，原始数据: {}", e, text))?;
+
+    Ok(result)
+}
+
 // 获取剩余账号数量统计
 #[tauri::command]
 pub async fn quick_register_get_stats() -> Result<StatsResponse, String> {
