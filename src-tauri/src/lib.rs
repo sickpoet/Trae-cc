@@ -5,15 +5,13 @@ mod api;
 mod account;
 mod autostart;
 mod machine;
-mod privacy;
-// mod tempmail_client; // 已禁用，依赖外部 exe 文件
-// mod quick_register_simple; // 已禁用快速注册功能
 mod browser_auto_login;
 mod logger;
 mod custom_tempmail;
 mod quick_register_backend;
 
 use std::collections::HashMap;
+use anyhow::anyhow;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -29,8 +27,18 @@ use uuid::Uuid;
 use warp::Filter;
 
 use account::{AccountBrief, AccountManager, Account};
-use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult};
-// use quick_register_simple::wait_for_request_cookies; // 已禁用快速注册功能
+use api::{TraeApiClient, UsageSummary, UsageQueryResponse, UserStatisticResult, is_auth_expired_error_message};
+
+/// 安全地获取 std::sync::Mutex 锁，如果锁被 poisoned 则恢复
+fn safe_lock<T>(mutex: &StdMutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    match mutex.lock() {
+        Ok(guard) => Some(guard),
+        Err(poisoned) => {
+            log::warn!("Mutex was poisoned, recovering...");
+            Some(poisoned.into_inner())
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 fn hide_console_window() {
@@ -360,11 +368,15 @@ async fn quick_register_with_custom_tempmail(
             }
 
             if !token.is_empty() {
-                if let Some(tx) = token_sender_route.lock().unwrap().take() {
-                    let _ = tx.send((token, url));
+                if let Some(mut guard) = safe_lock(&token_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send((token, url));
+                    }
                 }
-                if let Some(tx) = shutdown_sender_route.lock().unwrap().take() {
-                    let _ = tx.send(());
+                if let Some(mut guard) = safe_lock(&shutdown_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
                 }
                 warp::reply::html("已收到 Token，注册成功。".to_string())
             } else {
@@ -402,7 +414,7 @@ async fn quick_register_with_custom_tempmail(
         .on_page_load(move |window, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Finished {
                 let _ = window.eval(helper_script_onload.clone());
-                if let Some((code, password)) = pending_completion_onload.lock().unwrap().clone() {
+                if let Some((code, password)) = safe_lock(&pending_completion_onload).and_then(|g| g.clone()) {
                     let code_js = serde_json::to_string(&code).unwrap_or_else(|_| "\"\"".to_string());
                     let password_js = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
                     let _ = window.eval(format!(
@@ -427,11 +439,15 @@ async fn quick_register_with_custom_tempmail(
     webview.on_window_event(move |event| {
         if let tauri::WindowEvent::Destroyed = event {
             println!("[custom-tempmail] 浏览器窗口被关闭");
-            if let Some(tx) = window_close_sender_clone.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&window_close_sender_clone) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
-            if let Some(tx) = window_close_sender_clone2.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&window_close_sender_clone2) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
         }
     });
@@ -462,7 +478,9 @@ async fn quick_register_with_custom_tempmail(
     };
 
     // 填入验证码和密码
-    *pending_completion.lock().unwrap() = Some((code.clone(), password.clone()));
+    if let Some(mut guard) = safe_lock(&pending_completion) {
+        *guard = Some((code.clone(), password.clone()));
+    }
     let code_js = serde_json::to_string(&code).unwrap_or_else(|_| "\"\"".to_string());
     let password_js = serde_json::to_string(&password).unwrap_or_else(|_| "\"\"".to_string());
     let _ = webview.eval(format!(
@@ -478,24 +496,32 @@ async fn quick_register_with_custom_tempmail(
                 Ok(Ok(res)) => res,
                 Ok(Err(_)) => {
                     let _ = webview.close();
-                    *pending_completion.lock().unwrap() = None;
+                    if let Some(mut guard) = safe_lock(&pending_completion) {
+                        *guard = None;
+                    }
                     return Err(ApiError::from(anyhow::anyhow!("等待 Token 失败")));
                 }
                 Err(_) => {
                     let _ = webview.close();
-                    *pending_completion.lock().unwrap() = None;
+                    if let Some(mut guard) = safe_lock(&pending_completion) {
+                        *guard = None;
+                    }
                     return Err(ApiError::from(anyhow::anyhow!("等待 Token 超时（60秒）")));
                 }
             }
         }
         _ = window_close_rx2 => {
-            *pending_completion.lock().unwrap() = None;
+            if let Some(mut guard) = safe_lock(&pending_completion) {
+                *guard = None;
+            }
             return Err(ApiError::from(anyhow::anyhow!("浏览器窗口被关闭，注册取消")));
         }
     };
 
     // Token 已获取，清除 pending_completion 防止 on_page_load 重复执行
-    *pending_completion.lock().unwrap() = None;
+    if let Some(mut guard) = safe_lock(&pending_completion) {
+        *guard = None;
+    }
 
     println!("[快速注册] 登录成功，保存账号...");
 
@@ -604,20 +630,25 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
             let password = query.get("password").cloned().unwrap_or_default();
 
             if !email.trim().is_empty() || !password.is_empty() {
-                let mut creds = credentials_route.lock().unwrap();
-                if !email.trim().is_empty() {
-                    creds.email = Some(email.trim().to_string());
-                }
-                if !password.is_empty() {
-                    creds.password = Some(password);
+                if let Some(mut creds) = safe_lock(&credentials_route) {
+                    if !email.trim().is_empty() {
+                        creds.email = Some(email.trim().to_string());
+                    }
+                    if !password.is_empty() {
+                        creds.password = Some(password);
+                    }
                 }
             }
             if !token.is_empty() {
-                if let Some(tx) = token_sender_route.lock().unwrap().take() {
-                    let _ = tx.send((token, url));
+                if let Some(mut guard) = safe_lock(&token_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send((token, url));
+                    }
                 }
-                if let Some(tx) = shutdown_sender_route.lock().unwrap().take() {
-                    let _ = tx.send(());
+                if let Some(mut guard) = safe_lock(&shutdown_sender_route) {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
                 }
                 warp::reply::html("已收到 Token，可以关闭此页面并返回应用。".to_string())
             } else if state == "logged_in" {
@@ -657,8 +688,10 @@ async fn start_browser_login(app: AppHandle, state: State<'_, AppState>) -> Resu
     let window_close_sender_clone = window_close_sender.clone();
     webview.on_window_event(move |event| {
         if let tauri::WindowEvent::Destroyed = event {
-            if let Some(tx) = window_close_sender_clone.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&window_close_sender_clone) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
         }
     });
@@ -692,8 +725,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
                 Ok(token) => token,
                 Err(_) => {
                     let _ = state.browser_login_cancel.lock().await.take();
-                    if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                        let _ = tx.send(());
+                    if let Some(mut guard) = safe_lock(&session.shutdown) {
+                        if let Some(tx) = guard.take() {
+                            let _ = tx.send(());
+                        }
                     }
                     let _ = session.webview.close();
                     // 清理 browser_login 状态
@@ -705,8 +740,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
         }
         _ = session.cancel => {
             let _ = state.browser_login_cancel.lock().await.take();
-            if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&session.shutdown) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
             let _ = session.webview.close();
             // 清理 browser_login 状态
@@ -716,8 +753,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
         }
         _ = session.window_close => {
             let _ = state.browser_login_cancel.lock().await.take();
-            if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&session.shutdown) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
             // 清理 browser_login 状态
             let mut browser_login = state.browser_login.lock().await;
@@ -726,8 +765,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
         }
         _ = tokio::time::sleep(Duration::from_secs(300)) => {
             let _ = state.browser_login_cancel.lock().await.take();
-            if let Some(tx) = session.shutdown.lock().unwrap().take() {
-                let _ = tx.send(());
+            if let Some(mut guard) = safe_lock(&session.shutdown) {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
             }
             let _ = session.webview.close();
             // 清理 browser_login 状态
@@ -737,8 +778,10 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
         }
     };
 
-    if let Some(tx) = session.shutdown.lock().unwrap().take() {
-        let _ = tx.send(());
+    if let Some(mut guard) = safe_lock(&session.shutdown) {
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(());
+        }
     }
     let _ = state.browser_login_cancel.lock().await.take();
 
@@ -752,13 +795,13 @@ async fn finish_browser_login(state: State<'_, AppState>) -> Result<Account> {
         })
         .unwrap_or_default();
 
-    let mut credentials = session.credentials.lock().unwrap().clone();
+    let mut credentials = safe_lock(&session.credentials).map(|g| g.clone()).unwrap_or_default();
     if credentials.email.as_deref().unwrap_or("").trim().is_empty()
         && credentials.password.as_deref().unwrap_or("").is_empty()
     {
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            let snapshot = session.credentials.lock().unwrap().clone();
+            let snapshot = safe_lock(&session.credentials).map(|g| g.clone()).unwrap_or_default();
             if !snapshot.email.as_deref().unwrap_or("").trim().is_empty()
                 || !snapshot.password.as_deref().unwrap_or("").is_empty()
             {
@@ -805,8 +848,10 @@ async fn cancel_browser_login(app: AppHandle, state: State<'_, AppState>) -> Res
         browser_login.take()
     };
     if let Some(session) = session {
-        if let Some(tx) = session.shutdown.lock().unwrap().take() {
-            let _ = tx.send(());
+        if let Some(mut guard) = safe_lock(&session.shutdown) {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(());
+            }
         }
         let _ = session.webview.destroy();
     }
@@ -1572,8 +1617,10 @@ pub fn run() {
             quick_register_backend::claim_resource_with_token,
         ])
         .setup(|app| {
-            // 获取主窗口并显示
+            // 获取主窗口并显示，标题加上版本号
             if let Some(window) = app.get_webview_window("main") {
+                let version = app.package_info().version.to_string();
+                let _ = window.set_title(&format!("Trae账号管理 v{}", version));
                 window.show().unwrap();
                 window.set_focus().unwrap();
             }

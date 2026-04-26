@@ -12,6 +12,14 @@ const API_BASE_US: &str = "https://api-us-east.trae.ai";
 const API_BASE_SG: &str = "https://api-sg-central.trae.ai";
 const API_BASE_UG: &str = "https://ug-normal.trae.ai";
 
+pub fn is_auth_expired_error_message(error_msg: &str) -> bool {
+    let normalized = error_msg.to_ascii_lowercase();
+    normalized.contains("401")
+        || normalized.contains("20310")
+        || normalized.contains("10304")
+        || normalized.contains("unauthorized")
+}
+
 pub struct EmailLoginResult {
     pub token: String,
     pub user_id: String,
@@ -29,7 +37,9 @@ pub struct TraeApiClient {
 
 impl TraeApiClient {
     pub fn new(cookies: &str) -> Result<Self> {
-        let client = Client::builder().build()?;
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
 
         let cleaned_cookies = cookies
             .lines()
@@ -49,7 +59,9 @@ impl TraeApiClient {
     }
 
     pub fn new_with_token(token: &str) -> Result<Self> {
-        let client = Client::builder().build()?;
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
 
         Ok(Self {
             client,
@@ -110,12 +122,28 @@ impl TraeApiClient {
         Ok(headers)
     }
 
-    pub async fn get_user_info_by_token(&self) -> Result<TokenUserInfo> {
+    fn token_user_info_from_jwt(jwt_data: JwtPayload) -> TokenUserInfo {
+        TokenUserInfo {
+            user_id: jwt_data.user_id,
+            tenant_id: jwt_data.tenant_id,
+            screen_name: None,
+            avatar_url: None,
+            email: None,
+        }
+    }
+
+    async fn get_user_info_by_token_strict(&self) -> Result<TokenUserInfo> {
         let token = self.jwt_token.as_ref().ok_or_else(|| anyhow!("Token 不存在"))?;
         let jwt_data = Self::parse_jwt_token(token)?;
 
         let headers = self.build_headers_token_only()?;
-        let endpoints = [&self.api_base, API_BASE_SG, API_BASE_US];
+        // 多区域轮询，避免单一端点异常时直接误判失败
+        let endpoints = [
+            self.api_base.as_str(),
+            API_BASE_UG,
+            API_BASE_SG,
+            API_BASE_US,
+        ];
 
         let mut last_error = anyhow!("所有 API 端点都失败");
 
@@ -139,6 +167,11 @@ impl TraeApiClient {
                                 .map(|p| p.entitlement_base_info.user_id.clone())
                                 .unwrap_or_else(|| jwt_data.user_id.clone());
 
+                            // 确保 user_id 不为空
+                            if user_id_from_api.is_empty() {
+                                return Err(anyhow!("API 返回的用户 ID 为空"));
+                            }
+
                             let user_detail = self.get_user_info_with_token().await.ok();
 
                             return Ok(TokenUserInfo {
@@ -154,7 +187,9 @@ impl TraeApiClient {
                         Err(e) => last_error = anyhow!("解析响应失败: {}", e),
                     }
                 }
-                Ok(resp) => last_error = anyhow!("API 返回错误: {}", resp.status()),
+                Ok(resp) => {
+                    last_error = anyhow!("API 返回错误: {}", resp.status());
+                }
                 Err(e) => last_error = anyhow!("请求失败: {}", e),
             }
         }
@@ -162,15 +197,37 @@ impl TraeApiClient {
         Err(last_error)
     }
 
+    pub async fn get_user_info_by_token(&self) -> Result<TokenUserInfo> {
+        let token = self.jwt_token.as_ref().ok_or_else(|| anyhow!("Token 不存在"))?;
+        let jwt_data = Self::parse_jwt_token(token)?;
+
+        match self.get_user_info_by_token_strict().await {
+            Ok(info) => Ok(info),
+            Err(_) => Ok(Self::token_user_info_from_jwt(jwt_data)),
+        }
+    }
+
+    pub async fn get_user_identity_by_token(&self) -> Result<TokenUserInfo> {
+        self.get_user_info_by_token().await
+    }
+
+    pub async fn validate_token_alive(&self) -> Result<TokenUserInfo> {
+        self.get_user_info_by_token_strict().await
+    }
+
     async fn get_user_info_with_token(&self) -> Result<UserInfoResult> {
         let headers = self.build_headers_token_only()?;
-        let endpoints = [API_BASE_UG, API_BASE_SG, API_BASE_US];
-        
+        let endpoints = [
+            self.api_base.as_str(),
+            API_BASE_UG,
+            API_BASE_SG,
+            API_BASE_US,
+        ];
+
         let mut last_error = anyhow!("所有 GetUserInfo API 端点都失败");
-        
+
         for base in endpoints.iter() {
             let url = format!("{}/cloudide/api/v3/trae/GetUserInfo", base);
-            println!("[TraeApiClient] 尝试 GetUserInfo 端点: {}", base);
 
             match self
                 .client
@@ -178,35 +235,36 @@ impl TraeApiClient {
                 .headers(headers.clone())
                 .json(&json!({"IfWebPage": true}))
                 .send()
-                .await 
+                .await
             {
                 Ok(resp) if resp.status().is_success() => {
                     match resp.json::<GetUserInfoResponse>().await {
                         Ok(data) => return Ok(data.result),
                         Err(e) => {
-                            println!("[TraeApiClient] 解析响应失败: {}", e);
                             last_error = anyhow!("解析响应失败: {}", e);
                         }
                     }
                 }
                 Ok(resp) => {
-                    println!("[TraeApiClient] GetUserInfo API 返回错误: {}", resp.status());
                     last_error = anyhow!("API 返回错误: {}", resp.status());
                 }
                 Err(e) => {
-                    println!("[TraeApiClient] GetUserInfo 请求失败: {}", e);
                     last_error = anyhow!("请求失败: {}", e);
                 }
             }
         }
 
-        // 所有 GetUserInfo API 端点都失败，尝试从 Token 解析基本信息
-        println!("[TraeApiClient] 所有 GetUserInfo API 端点都失败，尝试从 Token 解析");
-        
         if let Some(ref token) = self.jwt_token {
             if let Ok(jwt_data) = Self::parse_jwt_token(token) {
+                let display_name = if jwt_data.user_id.len() >= 8 {
+                    format!("User_{}", &jwt_data.user_id[..8])
+                } else if !jwt_data.user_id.is_empty() {
+                    format!("User_{}", jwt_data.user_id)
+                } else {
+                    "User_Unknown".to_string()
+                };
                 return Ok(UserInfoResult {
-                    screen_name: format!("User_{}", &jwt_data.user_id[..8.min(jwt_data.user_id.len())]),
+                    screen_name: display_name,
                     gender: String::new(),
                     avatar_url: String::new(),
                     user_id: jwt_data.user_id,
@@ -226,7 +284,7 @@ impl TraeApiClient {
         Err(last_error)
     }
 
-    fn parse_jwt_token(token: &str) -> Result<JwtPayload> {
+    pub fn parse_jwt_token(token: &str) -> Result<JwtPayload> {
         // URL 解码 token（如果它被编码了）
         let decoded_token = urlencoding::decode(token)
             .map_err(|e| anyhow!("URL 解码 token 失败: {}", e))?
@@ -307,12 +365,13 @@ impl TraeApiClient {
             headers.insert(header::COOKIE, cookie_value);
         }
 
-        // 所有端点按优先级排序
+        // 所有端点按优先级排序：UG-US 是最容易成功的
         let endpoints = vec![
+            ("https://ug-normal.us.trae.ai", "UG-US"),
+            ("https://ug-normal.trae.ai", "UG-Global"),
+            ("https://api-sg-central.trae.ai", "SG"),
+            ("https://api-us-east.trae.ai", "US"),
             (self.api_base.as_str(), "Primary"),
-            (API_BASE_SG, "SG"),
-            (API_BASE_US, "US"),
-            (API_BASE_UG, "UG"),
         ];
         
         let mut last_error = anyhow!("所有端点都失败");

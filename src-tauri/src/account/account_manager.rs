@@ -4,7 +4,43 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use super::types::*;
-use crate::api::{TraeApiClient, UsageSummary, UsageQueryResponse, login_with_email};
+use crate::api::{TraeApiClient, UsageSummary, UsageQueryResponse, is_auth_expired_error_message, login_with_email};
+
+fn canonicalize_stored_region(region: &str) -> String {
+    let upper = region.trim().to_ascii_uppercase();
+    if upper.is_empty() {
+        return String::new();
+    }
+
+    if upper.starts_with("US") || upper.contains("USEAST") {
+        "US".to_string()
+    } else if upper.starts_with("JP") || upper.contains("APJPN") {
+        "JP".to_string()
+    } else if upper.starts_with("CN") || upper.contains("CNNORTH") {
+        "CN".to_string()
+    } else if upper.starts_with("SG") || upper.contains("ALISG") {
+        "SG".to_string()
+    } else {
+        upper
+    }
+}
+
+/// 生成安全的用户显示名称，避免空字符串或越界切片导致的 panic
+fn safe_user_display_name(user_id: &str, fallback_name: Option<&str>) -> String {
+    if let Some(name) = fallback_name {
+        if !name.trim().is_empty() {
+            return name.trim().to_string();
+        }
+    }
+
+    if user_id.len() >= 8 {
+        format!("User_{}", &user_id[..8])
+    } else if !user_id.is_empty() {
+        format!("User_{}", user_id)
+    } else {
+        "User_Unknown".to_string()
+    }
+}
 
 /// 账号管理器
 pub struct AccountManager {
@@ -23,6 +59,11 @@ impl AccountManager {
         for account in &mut store.accounts {
             if account.machine_id.is_none() {
                 account.machine_id = Some(Uuid::new_v4().to_string());
+                changed = true;
+            }
+            let normalized_region = canonicalize_stored_region(&account.region);
+            if normalized_region != account.region {
+                account.region = normalized_region;
                 changed = true;
             }
         }
@@ -73,7 +114,24 @@ impl AccountManager {
     /// 保存账号存储
     fn save_store(&self) -> Result<()> {
         let content = serde_json::to_string_pretty(&self.store)?;
-        fs::write(&self.data_path, content)?;
+
+        // 如果文件已存在，先读取并比较，避免无谓的写入和日志
+        if self.data_path.exists() {
+            if let Ok(existing) = fs::read_to_string(&self.data_path) {
+                if existing == content {
+                    return Ok(());
+                }
+            }
+        }
+
+        fs::write(&self.data_path, content).map_err(|e| {
+            anyhow!("无法写入账号数据文件: {}", e)
+        })?;
+        Ok(())
+    }
+
+    pub fn reload_from_disk(&mut self) -> Result<()> {
+        self.store = Self::load_store(&self.data_path)?;
         Ok(())
     }
 
@@ -224,8 +282,8 @@ impl AccountManager {
         
         let client = TraeApiClient::new_with_token(&token)?;
 
-        // 通过 Token 获取用户信息
-        let user_info = client.get_user_info_by_token().await?;
+        // 新增账号时允许身份读取兜底，避免因为验活失败丢失本地导入能力。
+        let user_info = client.get_user_identity_by_token().await?;
 
         // 检查是否已存在
         let existing_index = self
@@ -246,20 +304,22 @@ impl AccountManager {
                         info.non_plain_text_email.unwrap_or_default(),
                         info.avatar_url,
                     ),
-                    Err(_) => (
-                        user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
-                        user_info.email.clone().unwrap_or_default(),
-                        user_info.avatar_url.clone().unwrap_or_default(),
-                    ),
+                    Err(_) => {
+                        (
+                            safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
+                            user_info.email.clone().unwrap_or_default(),
+                            user_info.avatar_url.clone().unwrap_or_default(),
+                        )
+                    },
                 }
             } else {
                 (
-                    user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                    safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                     user_info.email.clone().unwrap_or_default(),
                     user_info.avatar_url.clone().unwrap_or_default(),
                 )
             };
-            
+
             {
                 let existing_account = &mut self.store.accounts[index];
                 existing_account.jwt_token = Some(token);
@@ -291,7 +351,7 @@ impl AccountManager {
         }
 
         // 如果提供了 Cookies，尝试获取更详细的用户信息
-        let (name, email, avatar_url) = if let Some(ref cookies_str) = cookies {
+        let (name, email, avatar_url): (String, String, String) = if let Some(ref cookies_str) = cookies {
             match self.get_user_info_with_cookies(cookies_str).await {
                 Ok(info) => (
                     info.screen_name,
@@ -299,14 +359,14 @@ impl AccountManager {
                     info.avatar_url,
                 ),
                 Err(_) => (
-                    user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                    safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                     user_info.email.unwrap_or_default(),
                     user_info.avatar_url.unwrap_or_default(),
                 ),
             }
         } else {
             (
-                user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                 user_info.email.unwrap_or_default(),
                 user_info.avatar_url.unwrap_or_default(),
             )
@@ -364,7 +424,7 @@ impl AccountManager {
                         info.tenant_id,
                     ),
                     Err(_) => (
-                        user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                        safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                         user_info.email.clone().unwrap_or_default(),
                         user_info.avatar_url.clone().unwrap_or_default(),
                         String::new(),
@@ -373,7 +433,7 @@ impl AccountManager {
                 }
             } else {
                 (
-                    user_info.screen_name.clone().unwrap_or_else(|| format!("User_{}", &user_info.user_id[..8.min(user_info.user_id.len())])),
+                    safe_user_display_name(&user_info.user_id, user_info.screen_name.as_deref()),
                     user_info.email.clone().unwrap_or_default(),
                     user_info.avatar_url.clone().unwrap_or_default(),
                     String::new(),
@@ -1314,7 +1374,7 @@ impl AccountManager {
         // 创建账号对象
         let mut account = Account::new(
             if username.is_empty() {
-                user_info.screen_name.unwrap_or_else(|| format!("User_{}", &user_id[..8.min(user_id.len())]))
+                safe_user_display_name(&user_id, user_info.screen_name.as_deref())
             } else {
                 username
             },
