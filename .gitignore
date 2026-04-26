@@ -70,6 +70,7 @@ accounts.txt
 
 # Scripts (Python helper scripts at root only, not src-tauri/scripts)
 /scripts/
+!/scripts/check-and-build.sh
 __pycache__/
 *.py[cod]
 .venv/

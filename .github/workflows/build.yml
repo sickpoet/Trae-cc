@@ -29,8 +29,14 @@ jobs:
         env:
           CI: true
 
+      - name: Get version and rename exe
+        shell: bash
+        run: |
+          VERSION=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          cp "src-tauri/target/release/Trae账号管理.exe" "src-tauri/target/release/Trae账号管理_${VERSION}.exe"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: src-tauri/target/release/*.exe
+          path: src-tauri/target/release/Trae账号管理_*.exe
