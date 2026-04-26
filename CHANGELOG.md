@@ -7,6 +7,29 @@
 
 ---
 
+## [3.1.0] - 2026-04-25
+
+### 🐛 Bug 修复
+
+- 修复注册时 `form.submit()` 和 `btn.click()` 冲突导致的重复点击问题 — 去掉 `form.submit()`，只通过按钮点击提交
+- 修复 `pending_completion` 使用后未清除导致 `on_page_load` 重复执行注册的问题
+- 修复 Token 等待无超时导致窗口永久挂起的问题 — 新增 60 秒超时
+
+### 🔧 优化改进
+
+- 注册状态检测从依赖混淆 CSS 类名改为轮询页面通知元素 + Token 拦截判断，更稳定
+- Cookie 弹窗从单次检查改为 MutationObserver + 定时持续监听，防止异步加载的弹窗遮挡按钮
+- 移除 800ms sleep 的无效 eval，页面加载通过 `on_page_load` 回调统一处理
+- 提取内联 JS 到独立文件（browser_login.js / register_helper.js），lib.rs 从 ~2490 行精简到 1614 行
+- 批量刷新改为 `Promise.allSettled` 并行执行
+- 搜索框添加 250ms debounce 防抖
+- AccountCard / AccountListItem 添加 `React.memo` 避免无效重渲染
+- 新增 ErrorBoundary 全局错误边界，防止白屏
+- 提取 `useToast` hook 和 SVG 图标组件（Icons.tsx）
+- 清理所有前端 `console.log` 调试日志
+
+---
+
 ## [1.0.6] - 2025-04-17
 
 ### 🔧 优化改进

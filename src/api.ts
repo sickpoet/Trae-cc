@@ -457,8 +457,6 @@ export async function createQuickRegisterTaskWithOpenid(
  * @returns 任务状态响应
  */
 export async function getTaskStatus(ticket: string): Promise<TaskStatusResponse> {
-  console.log("查询任务状态 ticket:", ticket);
-  // 通过 Tauri 命令调用 Rust 后端，绕过 CORS 限制
   return invoke("quick_register_get_status", { ticket });
 }
 
@@ -542,7 +540,6 @@ export function pollTaskVerification(
         }
 
         const status = await getTaskStatus(ticket);
-        console.log("轮询状态:", status);
         
         // 调用状态变化回调
         onStatusChange?.(status);

@@ -61,7 +61,6 @@ export function ContextMenu({
           </div>
         ) : (
           <div className="context-menu-item" onClick={() => {
-            console.log("[ContextMenu] 点击了切换账号");
             onSwitchAccount();
           }}>
             <span className="icon">🔀</span>

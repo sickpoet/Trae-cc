@@ -64,19 +64,11 @@ export function Stats({ accounts, hasLoaded = true }: StatsProps) {
 
   useEffect(() => {
     let cancelled = false;
-    
-    // 调试日志
-    console.log('[Stats] accounts:', accounts);
-    console.log('[Stats] accounts.length:', accounts.length);
-    
+
     // 只获取当前登录账号的数据
     const currentAccount = accounts.find(a => a.is_current);
-    
-    console.log('[Stats] currentAccount:', currentAccount);
-    console.log('[Stats] hasLoaded:', hasLoaded);
-    
+
     if (!currentAccount) {
-      console.log('[Stats] 没有找到当前账号，清空统计数据');
       setUserStats(null);
       setLoadingStats(false);
       setStatsError(null);
@@ -88,7 +80,6 @@ export function Stats({ accounts, hasLoaded = true }: StatsProps) {
 
     // Load cache for current account only
     const cache = loadStatsCache(currentAccount.id);
-    console.log('[Stats] cache:', cache);
 
     // Display valid cache immediately (even if stale)
     if (cache?.data) {
@@ -101,7 +92,6 @@ export function Stats({ accounts, hasLoaded = true }: StatsProps) {
 
     // Check if cache is stale (older than today 00:00)
     const isStale = !cache || cache.cachedAt < todayStart;
-    console.log('[Stats] isStale:', isStale);
 
     if (!isStale) {
       setLoadingStats(false);
@@ -111,13 +101,11 @@ export function Stats({ accounts, hasLoaded = true }: StatsProps) {
     // Fetch current account data
     (async () => {
       try {
-        console.log(`[Stats] 正在获取当前账号 ${currentAccount.id} 的统计数据...`);
         const stats = await api.getUserStatistics(currentAccount.id);
         saveStatsCache(currentAccount.id, stats);
-        
+
         if (cancelled) return;
 
-        console.log(`[Stats] 成功获取当前账号统计数据:`, stats);
         setUserStats(stats);
         setStatsError(null);
       } catch (e: any) {

@@ -14,6 +14,9 @@ import { UpdateModal } from "./components/UpdateModal";
 import { Stats } from "./pages/Stats";
 import { Settings } from "./pages/Settings";
 import { About } from "./pages/About";
+import { useDebounce } from "./hooks/useDebounce";
+import { useToast } from "./hooks/useToast";
+import { SearchIcon, ChevronDownIcon, GridIcon, ListIcon, RefreshIcon, TrashIcon, MoreIcon, DownloadIcon, UploadIcon, DeleteWithLineIcon } from "./components/Icons";
 
 import * as api from "./api";
 import type { Account, AccountBrief, AppSettings, UsageSummary } from "./types";
@@ -40,11 +43,12 @@ function App() {
   const [currentPage, setCurrentPage] = useState("accounts");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [emailFilter, setEmailFilter] = useState("");
+  const debouncedEmailFilter = useDebounce(emailFilter, 250);
   const [quotaFilter, setQuotaFilter] = useState<"all" | "with" | "without">("all");
   const [showBatchDropdown, setShowBatchDropdown] = useState(false);
 
-  // Toast 通知状态
-  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  // Toast 通知
+  const { toasts, addToast, removeToast } = useToast();
 
   // 确认弹窗状态
   const [confirmModal, setConfirmModal] = useState<{
@@ -82,7 +86,6 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
 
   const quickRegisterNoticeRef = useRef<Map<string, number>>(new Map());
-  const toastDedupRef = useRef<Map<string, number>>(new Map());
   const quickRegisterShowWindow = appSettings?.quick_register_show_window ?? false;
   const batchDropdownRef = useRef<HTMLDivElement>(null);
 
@@ -102,40 +105,10 @@ function App() {
 
 
 
-  // 添加 Toast 通知，返回 Toast ID
-  const addToast = useCallback(
-    (type: ToastMessage["type"], message: string, duration?: number, dedupeKey?: string): string => {
-      if (dedupeKey) {
-        const now = Date.now();
-        const last = toastDedupRef.current.get(dedupeKey);
-        if (last && now - last < 800) {
-          return "";
-        }
-        toastDedupRef.current.set(dedupeKey, now);
-      }
-      const id =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      setToasts((prev) => [...prev, { id, type, message, duration }]);
-      return id;
-    },
-    []
-  );
-
-  // 移除 Toast 通知
-  const removeToast = useCallback((id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
   useEffect(() => {
     const handleOffline = () => {
       const id = "network-offline";
-      setToasts((prev) => {
-        // 防止重复添加
-        if (prev.some((t) => t.id === id)) return prev;
-        return [...prev, { id, type: "error", message: "网络连接已断开，请检查网络设置", duration: 0 }];
-      });
+      addToast("error", "网络连接已断开，请检查网络设置", 0, "network-offline");
       offlineToastIdRef.current = id;
     };
 
@@ -328,7 +301,6 @@ function App() {
         if (update) {
           // 如果用户已经忽略了这个版本，不再提示
           if (lastDismissedVersion === update.version) {
-            console.log("用户已忽略此版本更新:", update.version);
             return;
           }
           
@@ -425,7 +397,6 @@ function App() {
 
   const handleAccountAdded = useCallback(
     (account: Account) => {
-      console.log("[handleAccountAdded] 添加账号:", account.id, account.email);
       
       // 直接创建新账号对象
       const nextAccount: AccountWithUsage = {
@@ -445,12 +416,9 @@ function App() {
       
       setAccounts((prev) => {
         const existing = prev.find((item) => item.id === account.id);
-        console.log("[handleAccountAdded] 已存在:", !!existing, "当前列表长度:", prev.length);
         if (existing) {
-          console.log("[handleAccountAdded] 更新已有账号");
           return prev.map((item) => (item.id === account.id ? { ...nextAccount, is_current: item.is_current, usage: item.usage } : item));
         }
-        console.log("[handleAccountAdded] 添加新账号到列表");
         return [...prev, nextAccount];
       });
       setError(null);
@@ -595,11 +563,6 @@ function App() {
         try {
           // 1. 获取当前活跃账号（用于备份）
           const currentAccount = accounts.find(a => a.is_active);
-          const targetAccount = accounts.find(a => a.id === accountId);
-          console.log(`[SwitchAccount] ========== 开始切换账号 ==========`);
-          console.log(`[SwitchAccount] 当前活跃账号:`, currentAccount?.id, currentAccount?.email);
-          console.log(`[SwitchAccount] 目标账号:`, accountId, targetAccount?.email);
-          
           // 2. 如果有当前活跃账号，先备份其上下文
           if (currentAccount && currentAccount.id !== accountId) {
             try {
@@ -610,9 +573,7 @@ function App() {
           }
           
           // 3. 执行账号切换
-          console.log(`[SwitchAccount] 开始执行账号切换...`);
           await api.switchAccount(accountId, { force });
-          console.log(`[SwitchAccount] 账号切换完成`);
 
           // 4. 恢复新账号的上下文（如果有备份）
           try {
@@ -821,7 +782,6 @@ function App() {
       if (!file) return;
 
       try {
-        console.log("[Import] 导入文件:", file.name);
         const text = await file.text();
         
         // 解析并显示要导入的账号数量
@@ -830,10 +790,6 @@ function App() {
           const parsed = JSON.parse(text);
           if (Array.isArray(parsed)) {
             totalAccounts = parsed.length;
-            console.log(`[Import] 文件包含 ${parsed.length} 个账号`);
-            if (parsed.length > 0 && parsed[0].email) {
-              console.log("[Import] 第一个账号:", parsed[0].email);
-            }
           }
         } catch (e) {
           console.warn("[Import] 无法预览文件内容");
@@ -889,7 +845,7 @@ function App() {
     input.click();
   };
 
-  // 批量刷新选中账号
+  // 批量刷新选中账号（并行执行）
   const handleBatchRefresh = async () => {
     if (selectedIds.size === 0) {
       addToast("warning", "请先选择要刷新的账号");
@@ -898,8 +854,14 @@ function App() {
 
     addToast("info", `正在刷新 ${selectedIds.size} 个账号...`);
 
-    for (const id of selectedIds) {
-      await handleRefreshAccount(id, { silent: true });
+    const results = await Promise.allSettled(
+      Array.from(selectedIds).map((id) => handleRefreshAccount(id, { silent: true }))
+    );
+    const failed = results.filter((r) => r.status === "rejected").length;
+    if (failed > 0) {
+      addToast("warning", `${selectedIds.size - failed} 个刷新成功，${failed} 个失败`);
+    } else {
+      addToast("success", `${selectedIds.size} 个账号刷新完成`);
     }
   };
 
@@ -1026,7 +988,7 @@ function App() {
     });
   };
 
-  const normalizedFilter = (emailFilter || "").trim().toLowerCase();
+  const normalizedFilter = (debouncedEmailFilter || "").trim().toLowerCase();
   const visibleAccounts = useMemo(() => {
     return Array.isArray(accounts)
       ? [...accounts]
@@ -1085,16 +1047,7 @@ function App() {
                       {visibleAccounts.length > 0 && visibleAccounts.every((account) => selectedIds.has(account.id)) ? "取消全选" : "全选"}
                     </button>
                     <div className="toolbar-search">
-                      <svg
-                        className="search-icon"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                      >
-                        <circle cx="11" cy="11" r="8"></circle>
-                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                      </svg>
+                      <SearchIcon className="search-icon" />
                       <input
                         type="text"
                         className="toolbar-search-input"
@@ -1114,9 +1067,7 @@ function App() {
                         <option value="with">有剩余额度</option>
                         <option value="without">无剩余额度</option>
                       </select>
-                      <svg className="quota-filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-                        <polyline points="6 9 12 15 18 9"/>
-                      </svg>
+                      <ChevronDownIcon className="quota-filter-icon" width={16} height={16} />
                     </div>
                     <div className="view-toggle">
                       <button
@@ -1124,55 +1075,25 @@ function App() {
                         onClick={() => setViewMode("grid")}
                         title="卡片视图"
                       >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-                          <rect x="3" y="3" width="7" height="7"/>
-                          <rect x="14" y="3" width="7" height="7"/>
-                          <rect x="3" y="14" width="7" height="7"/>
-                          <rect x="14" y="14" width="7" height="7"/>
-                        </svg>
+                        <GridIcon width={16} height={16} />
                       </button>
                       <button
                         className={`view-btn ${viewMode === "list" ? "active" : ""}`}
                         onClick={() => setViewMode("list")}
                         title="列表视图"
                       >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16">
-                          <line x1="8" y1="6" x2="21" y2="6"/>
-                          <line x1="8" y1="12" x2="21" y2="12"/>
-                          <line x1="8" y1="18" x2="21" y2="18"/>
-                          <line x1="3" y1="6" x2="3.01" y2="6"/>
-                          <line x1="3" y1="12" x2="3.01" y2="12"/>
-                          <line x1="3" y1="18" x2="3.01" y2="18"/>
-                        </svg>
+                        <ListIcon width={16} height={16} />
                       </button>
                     </div>
                     
                     {selectedIds.size > 0 && (
                       <div className="batch-actions">
                         <button className="batch-btn" onClick={handleBatchRefresh}>
-                          <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            width="14"
-                            height="14"
-                          >
-                            <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-                          </svg>
+                          <RefreshIcon width={14} height={14} />
                           刷新
                         </button>
                         <button className="batch-btn danger" onClick={handleBatchDelete}>
-                          <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2"
-                            width="14"
-                            height="14"
-                          >
-                            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                          </svg>
+                          <TrashIcon width={14} height={14} />
                           删除
                         </button>
                       </div>
@@ -1188,31 +1109,9 @@ function App() {
                         onClick={() => setShowBatchDropdown(!showBatchDropdown)}
                         style={{ padding: "6px 12px", fontSize: "12px" }}
                       >
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          width="14"
-                          height="14"
-                          style={{ marginRight: "4px", verticalAlign: "middle" }}
-                        >
-                          <circle cx="12" cy="12" r="1" />
-                          <circle cx="19" cy="12" r="1" />
-                          <circle cx="5" cy="12" r="1" />
-                        </svg>
+                        <MoreIcon width={14} height={14} style={{ marginRight: "4px", verticalAlign: "middle" }} />
                         更多
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          width="12"
-                          height="12"
-                          style={{ marginLeft: "4px", verticalAlign: "middle", transform: showBatchDropdown ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}
-                        >
-                          <polyline points="6 9 12 15 18 9"/>
-                        </svg>
+                        <ChevronDownIcon width={12} height={12} style={{ marginLeft: "4px", verticalAlign: "middle", transform: showBatchDropdown ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
                       </button>
                       
                       {showBatchDropdown && (
@@ -1224,11 +1123,7 @@ function App() {
                               handleImportAccounts();
                             }}
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                              <polyline points="7 10 12 15 17 10"/>
-                              <line x1="12" y1="15" x2="12" y2="3"/>
-                            </svg>
+                            <DownloadIcon width={14} height={14} />
                             导入账号
                           </button>
                           <button
@@ -1240,11 +1135,7 @@ function App() {
                             disabled={accounts.length === 0}
                             style={{ opacity: accounts.length === 0 ? 0.5 : 1, cursor: accounts.length === 0 ? "not-allowed" : "pointer" }}
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                              <polyline points="17 8 12 3 7 8"/>
-                              <line x1="12" y1="3" x2="12" y2="15"/>
-                            </svg>
+                            <UploadIcon width={14} height={14} />
                             导出账号
                           </button>
                           <div className="dropdown-divider" />
@@ -1255,11 +1146,7 @@ function App() {
                               handleCheckInvalidAccounts();
                             }}
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                              <line x1="10" y1="11" x2="10" y2="17"/>
-                              <line x1="14" y1="11" x2="14" y2="17"/>
-                            </svg>
+                            <DeleteWithLineIcon width={14} height={14} />
                             清理无效账号
                           </button>
                           <button
@@ -1269,11 +1156,7 @@ function App() {
                               handleDeleteNoQuotaAccounts();
                             }}
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                              <line x1="10" y1="11" x2="10" y2="17"/>
-                              <line x1="14" y1="11" x2="14" y2="17"/>
-                            </svg>
+                            <DeleteWithLineIcon width={14} height={14} />
                             删除无额度账号
                           </button>
                           <div className="dropdown-divider" />
@@ -1286,9 +1169,7 @@ function App() {
                             disabled={selectedIds.size === 0}
                             style={{ opacity: selectedIds.size === 0 ? 0.5 : 1, cursor: selectedIds.size === 0 ? "not-allowed" : "pointer" }}
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                              <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-                            </svg>
+                            <RefreshIcon width={14} height={14} />
                             刷新选中 ({selectedIds.size})
                           </button>
                           <button
@@ -1300,9 +1181,7 @@ function App() {
                             disabled={selectedIds.size === 0}
                             style={{ opacity: selectedIds.size === 0 ? 0.5 : 1, cursor: selectedIds.size === 0 ? "not-allowed" : "pointer" }}
                           >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
-                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                            </svg>
+                            <TrashIcon width={14} height={14} />
                             删除选中 ({selectedIds.size})
                           </button>
                         </div>

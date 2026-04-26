@@ -1,3 +1,5 @@
+import { memo } from "react";
+import { VerticalDotsIcon } from "./Icons";
 import type { UsageSummary } from "../types";
 
 interface AccountListItemProps {
@@ -15,7 +17,7 @@ interface AccountListItemProps {
   onContextMenu: (e: React.MouseEvent, id: string) => void;
 }
 
-export function AccountListItem({ account, usage, selected, onSelect, onContextMenu }: AccountListItemProps) {
+export const AccountListItem = memo(function AccountListItem({ account, usage, selected, onSelect, onContextMenu }: AccountListItemProps) {
   const hasUsage = !!usage;
   
   // 根据是否是美元计费模式显示不同的额度
@@ -163,13 +165,9 @@ export function AccountListItem({ account, usage, selected, onSelect, onContextM
             onContextMenu(e, account.id);
           }}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <circle cx="12" cy="5" r="2"/>
-            <circle cx="12" cy="12" r="2"/>
-            <circle cx="12" cy="19" r="2"/>
-          </svg>
+          <VerticalDotsIcon width={16} height={16} />
         </button>
       </div>
     </div>
   );
-}
+});

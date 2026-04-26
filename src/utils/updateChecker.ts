@@ -25,7 +25,6 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
     
     if (!response.ok) {
       // 静默失败，不抛出错误
-      console.log("更新服务器返回错误:", response.status);
       return null;
     }
     
@@ -46,7 +45,6 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
     return null;
   } catch (error) {
     // 静默失败，只在控制台记录错误
-    console.log("检查更新失败（可能是网络问题）:", error);
     return null;
   }
 }

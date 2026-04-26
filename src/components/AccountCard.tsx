@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import type { UsageSummary } from "../types";
 
 interface AccountCardProps {
@@ -19,7 +19,7 @@ interface AccountCardProps {
   onToast?: (type: "success" | "error" | "warning" | "info", message: string, duration?: number) => void;
 }
 
-export function AccountCard({ account, usage, selected, onSelect, onContextMenu, onToast }: AccountCardProps) {
+export const AccountCard = memo(function AccountCard({ account, usage, selected, onSelect, onContextMenu, onToast }: AccountCardProps) {
   const [copied, setCopied] = useState(false);
   const getUsageLevel = (used: number, limit: number) => {
     if (limit === 0) return "low";
@@ -269,4 +269,4 @@ export function AccountCard({ account, usage, selected, onSelect, onContextMenu,
       </div>
     </div>
   );
-}
+});
