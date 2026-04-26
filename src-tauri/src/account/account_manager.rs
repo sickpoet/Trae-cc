@@ -617,44 +617,11 @@ impl AccountManager {
             .ok_or_else(|| anyhow!("账号不存在"))?
             .clone();
 
-        // 检查 Token 是否过期，如果过期则尝试刷新
-        let token = if let Some(token) = &account.jwt_token {
-            if let Some(expired_at) = &account.token_expired_at {
-                let expired = chrono::DateTime::parse_from_rfc3339(expired_at)
-                    .map(|dt| dt.with_timezone(&chrono::Utc) < chrono::Utc::now())
-                    .unwrap_or(true);
-                
-                if expired && !account.cookies.is_empty() {
-                    // Token 已过期，尝试使用 Cookies 刷新
-                    let mut cookie_client = TraeApiClient::new(&account.cookies)?;
-                    match cookie_client.get_user_token().await {
-                        Ok(token_result) => {
-                            // 更新存储的 Token
-                            if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account_id) {
-                                acc.jwt_token = Some(token_result.token.clone());
-                                acc.token_expired_at = Some(token_result.expired_at.clone());
-                            }
-                            self.save_store()?;
-                            token_result.token
-                        }
-                        Err(e) => {
-                            return Err(anyhow!("Token 已过期且刷新失败: {}", e));
-                        }
-                    }
-                } else if expired {
-                    return Err(anyhow!("Token 已过期且没有 Cookies 可以刷新"));
-                } else {
-                    token.clone()
-                }
-            } else {
-                token.clone()
-            }
-        } else if !account.cookies.is_empty() {
-            // 没有 Token 但有 Cookies，尝试获取 Token
+        // 切换前先用 Cookies 刷新 Token（确保拿到最新有效的 Token）
+        let token = if !account.cookies.is_empty() {
             let mut cookie_client = TraeApiClient::new(&account.cookies)?;
             match cookie_client.get_user_token().await {
                 Ok(token_result) => {
-                    // 更新存储的 Token
                     if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account_id) {
                         acc.jwt_token = Some(token_result.token.clone());
                         acc.token_expired_at = Some(token_result.expired_at.clone());
@@ -663,9 +630,17 @@ impl AccountManager {
                     token_result.token
                 }
                 Err(e) => {
-                    return Err(anyhow!("获取 Token 失败: {}", e));
+                    // 刷新失败，降级使用已有 Token（如果有）
+                    if let Some(existing_token) = &account.jwt_token {
+                        println!("[WARN] 切换前刷新 Token 失败（{}），使用已有 Token", e);
+                        existing_token.clone()
+                    } else {
+                        return Err(anyhow!("获取 Token 失败: {}", e));
+                    }
                 }
             }
+        } else if let Some(existing_token) = &account.jwt_token {
+            existing_token.clone()
         } else {
             return Err(anyhow!("账号没有有效的 Token 或 Cookies，无法切换"));
         };

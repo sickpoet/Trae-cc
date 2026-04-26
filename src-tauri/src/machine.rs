@@ -641,7 +641,7 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     let indexed_db_path = trae_path.join("IndexedDB");
     if indexed_db_path.exists() {
         // 只删除包含登录相关数据的 IndexedDB，保留聊天记录
-        let login_related_patterns = ["auth", "login", "token", "session", "credential"];
+        let login_related_patterns = ["auth", "login", "token", "credential"];
         if let Ok(entries) = fs::read_dir(&indexed_db_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -658,7 +658,7 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     let local_storage_path = trae_path.join("Local Storage");
     if local_storage_path.exists() {
         // 只删除包含登录相关键值的 Local Storage 文件
-        let login_keys = ["auth", "login", "token", "session", "credential", "trae"];
+        let login_keys = ["auth", "login", "token", "credential"];
         if let Ok(entries) = fs::read_dir(&local_storage_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -964,19 +964,34 @@ pub fn backup_account_context(account_id: &str) -> Result<PathBuf> {
     if workspace_src.exists() {
         copy_dir_all(&workspace_src, &workspace_dst)?;
     }
-    
+
     // 备份 globalStorage
     let global_src = get_trae_global_storage_path()?;
     let global_dst = backup_dir.join("globalStorage");
     if global_src.exists() {
         copy_dir_all(&global_src, &global_dst)?;
     }
-    
+
     // 备份 state.vscdb
     let state_src = get_trae_state_db_path()?;
     let state_dst = backup_dir.join("state.vscdb");
     if state_src.exists() {
         fs::copy(&state_src, &state_dst)?;
+    }
+
+    // 备份 IndexedDB
+    let trae_path = get_trae_data_path()?;
+    let indexed_db_src = trae_path.join("IndexedDB");
+    let indexed_db_dst = backup_dir.join("IndexedDB");
+    if indexed_db_src.exists() {
+        copy_dir_all(&indexed_db_src, &indexed_db_dst)?;
+    }
+
+    // 备份 Local Storage
+    let local_storage_src = trae_path.join("Local Storage");
+    let local_storage_dst = backup_dir.join("LocalStorage");
+    if local_storage_src.exists() {
+        copy_dir_all(&local_storage_src, &local_storage_dst)?;
     }
     
     Ok(backup_dir)
@@ -988,7 +1003,8 @@ pub fn restore_account_context(account_id: &str) -> Result<()> {
     let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
         .ok_or_else(|| anyhow!("无法获取应用数据目录"))?;
     let backup_dir = proj_dirs.data_dir().join("account_contexts").join(account_id);
-    
+    let trae_path = get_trae_data_path()?;
+
     if !backup_dir.exists() {
         return Err(anyhow!("账号 {} 没有备份的上下文数据", account_id));
     }
@@ -1060,7 +1076,26 @@ pub fn restore_account_context(account_id: &str) -> Result<()> {
     let state_dst = get_trae_state_db_path()?;
     if state_src.exists() {
         fs::copy(&state_src, &state_dst)?;
+    }
 
+    // 恢复 IndexedDB
+    let indexed_db_src = backup_dir.join("IndexedDB");
+    let indexed_db_dst = trae_path.join("IndexedDB");
+    if indexed_db_src.exists() {
+        if indexed_db_dst.exists() {
+            fs::remove_dir_all(&indexed_db_dst)?;
+        }
+        copy_dir_all(&indexed_db_src, &indexed_db_dst)?;
+    }
+
+    // 恢复 Local Storage
+    let local_storage_src = backup_dir.join("LocalStorage");
+    let local_storage_dst = trae_path.join("Local Storage");
+    if local_storage_src.exists() {
+        if local_storage_dst.exists() {
+            fs::remove_dir_all(&local_storage_dst)?;
+        }
+        copy_dir_all(&local_storage_src, &local_storage_dst)?;
     }
     
     Ok(())
