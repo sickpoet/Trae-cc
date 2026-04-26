@@ -40,3 +40,17 @@ jobs:
         with:
           name: windows-exe
           path: src-tauri/target/release/Trae账号管理_*.exe
+
+      - name: Create Release and upload exe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          VERSION=$(grep '"version"' src-tauri/tauri.conf.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          TAG="v${VERSION}"
+          EXE="src-tauri/target/release/Trae账号管理_${VERSION}.exe"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$EXE" --clobber
+          else
+            gh release create "$TAG" "$EXE" --title "$TAG" --notes "Trae账号管理 ${TAG}" --latest
+          fi

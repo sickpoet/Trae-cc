@@ -40,6 +40,20 @@ GitHub 仓库 → Actions → Build Windows → Run workflow。
 
 启动后标题自动显示：`Trae账号管理 v{版本号}`
 
+## 启动时自动校验 exe
+
+每次进入本项目，执行以下检查（无需用户提示）：
+
+1. 读取 `package.json` 中的版本号（如 `3.2.4`）
+2. 检查 `appexe/` 目录是否存在对应文件（如 `Trae账号管理_3.2.4.exe`）
+3. 如果不存在，用 `gh` 下载最新 Release 的 exe：
+   ```bash
+   gh release download v{版本号} -p "*.exe" -D appexe/ -R sickpoet/Trae-cc
+   ```
+4. 下载完成后用 `ls appexe/` 确认文件到位
+
+注意：只检查不匹配时才下载，已有则跳过，不要重复操作。
+
 ## 开发
 
 ```bash
