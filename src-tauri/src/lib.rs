@@ -9,6 +9,7 @@ mod browser_auto_login;
 mod logger;
 mod custom_tempmail;
 mod quick_register_backend;
+mod privacy;
 
 use std::collections::HashMap;
 use anyhow::anyhow;
