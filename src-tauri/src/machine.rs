@@ -667,9 +667,20 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
         let _ = cleanup_auth_from_vscdb(&state_db_path);
     }
 
+    // 5. 清除 Chromium Cookies（旧账号的 session cookie 会导致 JWT 与 session 不匹配）
+    let cookies_path = trae_path.join("Network").join("Cookies");
+    let cookies_journal_path = trae_path.join("Network").join("Cookies-journal");
+    if cookies_path.exists() {
+        let _ = fs::remove_file(&cookies_path);
+        println!("[INFO] 已清除 Cookies");
+    }
+    if cookies_journal_path.exists() {
+        let _ = fs::remove_file(&cookies_journal_path);
+    }
+
     println!("[INFO] 已切换 Trae IDE 到账号: {}", info.email);
 
-    // 5. 自动打开 Trae IDE（仅在需要时）
+    // 6. 自动打开 Trae IDE（仅在需要时）
     if auto_start {
         if let Err(e) = open_trae() {
             println!("[WARN] 自动打开 Trae IDE 失败: {}", e);
