@@ -601,7 +601,7 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
     Ok(())
 }
 
-/// 切换 Trae IDE 到指定账号（清除旧登录状态并写入新账号信息）
+/// 切换 Trae IDE 到指定账号（精确替换认证数据，不删除会话状态）
 pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_start: bool) -> Result<()> {
     // 0. 先关闭 Trae IDE
     kill_trae()?;
@@ -618,83 +618,7 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
         .map_err(|e| anyhow!("写入 Trae 机器码失败: {}", e))?;
     println!("[INFO] 已设置 Trae 机器码: {}", new_machine_id);
 
-    // 2. 删除 state.vscdb 数据库（清除旧的登录缓存）
-    let state_db_path = trae_path.join("User").join("globalStorage").join("state.vscdb");
-    if state_db_path.exists() {
-        let _ = fs::remove_file(&state_db_path);
-        println!("[INFO] 已删除 state.vscdb");
-    }
-
-    // 3. 删除 state.vscdb.backup
-    let state_db_backup_path = trae_path.join("User").join("globalStorage").join("state.vscdb.backup");
-    if state_db_backup_path.exists() {
-        let _ = fs::remove_file(&state_db_backup_path);
-    }
-
-    // 4. 清除 Local State
-    let local_state_path = trae_path.join("Local State");
-    if local_state_path.exists() {
-        let _ = fs::remove_file(&local_state_path);
-    }
-
-    // 5. 清除 IndexedDB 中的登录相关数据（保留聊天记录和上下文）
-    let indexed_db_path = trae_path.join("IndexedDB");
-    if indexed_db_path.exists() {
-        // 只删除包含登录相关数据的 IndexedDB，保留聊天记录
-        let login_related_patterns = ["auth", "login", "token", "credential"];
-        if let Ok(entries) = fs::read_dir(&indexed_db_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-                if login_related_patterns.iter().any(|p| name.contains(p)) {
-                    let _ = fs::remove_dir_all(&path);
-                    println!("[INFO] 已清除登录相关的 IndexedDB: {}", name);
-                }
-            }
-        }
-    }
-
-    // 6. 清除 Local Storage 中的登录相关数据（保留浏览记录和上下文）
-    let local_storage_path = trae_path.join("Local Storage");
-    if local_storage_path.exists() {
-        // 只删除包含登录相关键值的 Local Storage 文件
-        let login_keys = ["auth", "login", "token", "credential"];
-        if let Ok(entries) = fs::read_dir(&local_storage_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(ext) = path.extension() {
-                    if ext == "localstorage" {
-                        // 读取文件内容，检查是否包含登录相关键值
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let content_lower = content.to_lowercase();
-                            if login_keys.iter().any(|k| content_lower.contains(k)) {
-                                let _ = fs::remove_file(&path);
-                                println!("[INFO] 已清除登录相关的 Local Storage");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 7. 保留 Session Storage（包含浏览记录和上下文，通常只包含当前会话数据）
-    // Session Storage 通常只包含当前会话数据，不删除以保留用户体验
-
-    // 8. 清除 Cookies
-    let cookies_path = trae_path.join("Network").join("Cookies");
-    if cookies_path.exists() {
-        let _ = fs::remove_file(&cookies_path);
-        println!("[INFO] 已清除 Cookies");
-    }
-
-    // 9. 清除 Cookies-journal
-    let cookies_journal_path = trae_path.join("Network").join("Cookies-journal");
-    if cookies_journal_path.exists() {
-        let _ = fs::remove_file(&cookies_journal_path);
-    }
-
-    // 10. 更新 storage.json 中的 telemetry ID 并写入登录信息
+    // 2. 更新 storage.json：替换认证信息和 telemetry ID，不动其他数据
     let storage_dir = trae_path.join("User").join("globalStorage");
     fs::create_dir_all(&storage_dir)
         .map_err(|e| anyhow!("创建目录失败: {}", e))?;
@@ -734,16 +658,53 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     fs::write(&storage_path, new_content)
         .map_err(|e| anyhow!("写入 storage.json 失败: {}", e))?;
 
-    // 11. 写入新的登录信息
+    // 3. 写入新的登录信息（追加 iCubeAuthInfo 和 iCubeEntitlementInfo）
     write_trae_login_info(info)?;
+
+    // 4. 清理 state.vscdb 中的旧认证缓存（精确删除，不删整个数据库）
+    let state_db_path = trae_path.join("User").join("globalStorage").join("state.vscdb");
+    if state_db_path.exists() {
+        let _ = cleanup_auth_from_vscdb(&state_db_path);
+    }
 
     println!("[INFO] 已切换 Trae IDE 到账号: {}", info.email);
 
-    // 12. 自动打开 Trae IDE（仅在需要时）
+    // 5. 自动打开 Trae IDE（仅在需要时）
     if auto_start {
         if let Err(e) = open_trae() {
             println!("[WARN] 自动打开 Trae IDE 失败: {}", e);
         }
+    }
+
+    Ok(())
+}
+
+/// 从 state.vscdb 中精确清理旧的认证相关缓存键，保留其他所有数据
+fn cleanup_auth_from_vscdb(db_path: &PathBuf) -> Result<()> {
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| anyhow!("无法打开 state.vscdb: {}", e))?;
+
+    // 只删除认证相关的历史缓存键，Trae IDE 会从 storage.json 重新读取
+    let auth_keys = [
+        "icube.auth.token",
+        "icube.auth.refreshToken",
+        "icube.auth.expiredAt",
+        "icube.auth.userId",
+        "icube.auth.host",
+        "icube.auth.region",
+        "icube.server.data",
+    ];
+
+    let mut deleted = 0;
+    for key in &auth_keys {
+        match conn.execute("DELETE FROM ItemTable WHERE key = ?1", [key]) {
+            Ok(n) => deleted += n,
+            Err(_) => {},
+        }
+    }
+
+    if deleted > 0 {
+        println!("[INFO] 已从 state.vscdb 清理 {} 条旧认证缓存", deleted);
     }
 
     Ok(())
