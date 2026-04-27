@@ -480,7 +480,7 @@ export function DetailModal({ isOpen, onClose, account, usage, onUpdateCredentia
           </div>
           <div className="detail-row">
             <span className="detail-label">套餐类型</span>
-            <span className="detail-value">{usage?.plan_type || account.plan_type || "Free"}</span>
+            <span className="detail-value">{usage?.plan_type || account.plan_type || "免费"}</span>
           </div>
           <div className="detail-row">
             <span className="detail-label">重置时间</span>
@@ -544,9 +544,9 @@ export function DetailModal({ isOpen, onClose, account, usage, onUpdateCredentia
                 )}
               </>
             ) : (
-              // 普通模式 - 显示 Fast Request
+              // 普通模式 - 显示 快速请求
               <div className="detail-section">
-                <h3>Fast Request</h3>
+                <h3>快速请求</h3>
                 <div className="detail-row">
                   <span className="detail-label">已使用</span>
                   <span className="detail-value">{formatNumber(usage.fast_request_used)}</span>
@@ -587,19 +587,19 @@ export function DetailModal({ isOpen, onClose, account, usage, onUpdateCredentia
             <div className="detail-section">
               <h3>其他配额</h3>
               <div className="detail-row">
-                <span className="detail-label">Slow Request</span>
+                <span className="detail-label">慢速请求</span>
                 <span className="detail-value">
                   {formatNumber(usage.slow_request_used)} / {formatNumber(usage.slow_request_limit)}
                 </span>
               </div>
               <div className="detail-row">
-                <span className="detail-label">Advanced Model</span>
+                <span className="detail-label">高级模型</span>
                 <span className="detail-value">
                   {formatNumber(usage.advanced_model_used)} / {formatNumber(usage.advanced_model_limit)}
                 </span>
               </div>
               <div className="detail-row">
-                <span className="detail-label">Autocomplete</span>
+                <span className="detail-label">自动补全</span>
                 <span className="detail-value">
                   {formatNumber(usage.autocomplete_used)} / {formatNumber(usage.autocomplete_limit)}
                 </span>

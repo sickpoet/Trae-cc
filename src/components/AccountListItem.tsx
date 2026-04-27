@@ -94,7 +94,7 @@ export const AccountListItem = memo(function AccountListItem({ account, usage, s
       </div>
 
       <div className="list-item-plan">
-        <span className="plan-badge">{usage?.plan_type || account.plan_type || "Free"}</span>
+        <span className="plan-badge">{usage?.plan_type || account.plan_type || "免费"}</span>
         {usage && usage.extra_fast_request_limit > 0 && (
           <span className="extra-badge">礼包</span>
         )}

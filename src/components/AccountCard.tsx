@@ -216,7 +216,7 @@ export const AccountCard = memo(function AccountCard({ account, usage, selected,
         // 普通模式 - 显示 Fast Requests
         <div className="card-usage">
           <div className="usage-header">
-            <span className="usage-label">Fast Requests</span>
+            <span className="usage-label">快速请求</span>
             <span className={`usage-percent ${usageLevel}`}>{usagePercent}%</span>
           </div>
           <div className="usage-bar">

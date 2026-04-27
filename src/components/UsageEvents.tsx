@@ -117,19 +117,19 @@ export function UsageEvents({ accountId, onError }: UsageEventsProps) {
               className={`filter-btn ${timeFilter === 'today' ? 'active' : ''}`}
               onClick={() => handleTimeFilterChange('today')}
             >
-              Today
+              今天
             </button>
             <button
               className={`filter-btn ${timeFilter === '7days' ? 'active' : ''}`}
               onClick={() => handleTimeFilterChange('7days')}
             >
-              7 days
+              7天
             </button>
             <button
               className={`filter-btn ${timeFilter === '30days' ? 'active' : ''}`}
               onClick={() => handleTimeFilterChange('30days')}
             >
-              30 days
+              30天
             </button>
           </div>
           <button
@@ -184,11 +184,11 @@ export function UsageEvents({ accountId, onError }: UsageEventsProps) {
           <table className="usage-events-table">
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Mode</th>
-                <th>Model</th>
+                <th>时间</th>
+                <th>模式</th>
+                <th>模型</th>
                 <th>
-                  Bill (USD)
+                  费用(USD)
                   <span className="info-icon" title="费用信息">
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                       <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.5"/>
@@ -196,7 +196,7 @@ export function UsageEvents({ accountId, onError }: UsageEventsProps) {
                     </svg>
                   </span>
                 </th>
-                <th>Request Cost</th>
+                <th>请求费用</th>
                 <th>Tokens</th>
               </tr>
             </thead>
@@ -206,7 +206,7 @@ export function UsageEvents({ accountId, onError }: UsageEventsProps) {
                   <td>{formatTimestamp(event.usage_time)}</td>
                   <td>{event.mode || '-'}</td>
                   <td>{event.model_name}</td>
-                  <td>{event.cost_money_float > 0 ? `$${event.cost_money_float.toFixed(4)}` : 'N/A'}</td>
+                  <td>{event.cost_money_float > 0 ? `$${event.cost_money_float.toFixed(4)}` : '无'}</td>
                   <td>{event.amount_float}</td>
                   <td>
                     {event.extra_info.input_token + event.extra_info.output_token}
