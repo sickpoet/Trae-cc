@@ -1006,17 +1006,17 @@ async fn fetch_usage_for_account(account: &Account) -> anyhow::Result<(UsageSumm
             Err(e) => {
                 let error_msg = e.to_string();
                 // 如果是 401 错误且有 Cookies，尝试刷新 Token
-                if error_msg.contains("401") && !account.cookies.is_empty() {
+                if is_auth_expired_error_message(&error_msg) && !account.cookies.is_empty() {
                     // 使用 Cookies 刷新 Token
                     let mut cookie_client = TraeApiClient::new(&account.cookies)?;
                     let token_result = cookie_client.get_user_token().await?;
-                    
+
                     new_token_info = Some((token_result.token.clone(), token_result.expired_at.clone()));
 
                     // 使用新 Token 重新获取使用量
                     let new_client = TraeApiClient::new_with_token(&token_result.token)?;
                     new_client.get_usage_summary_by_token().await?
-                } else if error_msg.contains("401") {
+                } else if is_auth_expired_error_message(&error_msg) {
                     return Err(anyhow::anyhow!("Token 已过期，请更新 Token 或 Cookies"));
                 } else {
                     return Err(e);

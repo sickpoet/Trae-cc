@@ -739,7 +739,7 @@ impl AccountManager {
                 Err(e) => {
                     let error_msg = e.to_string();
                     // 如果是 401 错误且有 Cookies，尝试刷新 Token
-                    if error_msg.contains("401") && !account.cookies.is_empty() {
+                    if is_auth_expired_error_message(&error_msg) && !account.cookies.is_empty() {
                         // 使用 Cookies 刷新 Token
                         let mut cookie_client = TraeApiClient::new(&account.cookies)?;
                         let token_result = cookie_client.get_user_token().await?;
@@ -774,7 +774,7 @@ impl AccountManager {
                         // 使用新 Token 重新获取使用量
                         let new_client = TraeApiClient::new_with_token(&token_result.token)?;
                         new_client.get_usage_summary_by_token().await?
-                    } else if error_msg.contains("401") {
+                    } else if is_auth_expired_error_message(&error_msg) {
                         return Err(anyhow!("登录已过期，请重新登录此账号"));
                     } else {
                         return Err(e);
@@ -1208,7 +1208,7 @@ impl AccountManager {
                 Err(e) => {
                     let error_msg = e.to_string();
                     // 如果是 401 错误且有 Cookies，尝试刷新 Token
-                    if error_msg.contains("401") && !account.cookies.is_empty() {
+                    if is_auth_expired_error_message(&error_msg) && !account.cookies.is_empty() {
                         println!("[INFO] Token 已过期，尝试使用 Cookies 刷新...");
                         // 使用 Cookies 刷新 Token
                         let mut cookie_client = TraeApiClient::new(&account.cookies)?;
@@ -1224,7 +1224,7 @@ impl AccountManager {
                         // 使用新 Token 重新查询
                         let new_client = TraeApiClient::new_with_token(&token_result.token)?;
                         new_client.query_usage(start_time, end_time, page_size, page_num).await
-                    } else if error_msg.contains("401") {
+                    } else if is_auth_expired_error_message(&error_msg) {
                         Err(anyhow!("登录已过期，请重新登录此账号"))
                     } else {
                         Err(e)
@@ -1450,7 +1450,7 @@ impl AccountManager {
                 println!("[get_account_statistics] 使用 token 也失败: {}", error_msg);
                 if error_msg.contains("403") {
                     Err(anyhow!("统计数据 API 需要账号 Cookies。请使用编辑账号功能输入邮箱密码重新登录，或删除账号后使用浏览器登录重新添加。"))
-                } else if error_msg.contains("401") || error_msg.contains("20310") || error_msg.contains("10304") {
+                } else if is_auth_expired_error_message(&error_msg) {
                     Err(anyhow!("登录已过期，请重新登录此账号以查看统计数据"))
                 } else {
                     Err(anyhow!("获取统计数据失败: {}", error_msg))
@@ -1492,7 +1492,7 @@ impl AccountManager {
                             Err(e) => {
                                 let error_msg = e.to_string();
                                 // 401 错误表示 Token 无效
-                                !error_msg.contains("401")
+                                !is_auth_expired_error_message(&error_msg)
                             }
                         }
                     }
@@ -1506,7 +1506,7 @@ impl AccountManager {
                             Ok(_) => true,
                             Err(e) => {
                                 let error_msg = e.to_string();
-                                !error_msg.contains("401")
+                                !is_auth_expired_error_message(&error_msg)
                             }
                         }
                     }
