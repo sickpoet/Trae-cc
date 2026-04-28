@@ -488,6 +488,8 @@ pub struct TraeLoginInfo {
     pub avatar_url: String,
     pub host: String,
     pub region: String,
+    /// Token 实际过期时间（ISO 8601 格式），用于写入 Trae IDE 的 expiredAt
+    pub token_expired_at: Option<String>,
 }
 
 /// 将账号登录信息写入 Trae IDE
@@ -513,9 +515,16 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
     let obj = json.as_object_mut()
         .ok_or_else(|| anyhow!("storage.json 格式错误"))?;
 
-    // 计算过期时间（14天后）
+    // 计算过期时间：优先使用 Token 的真实过期时间，否则降级用 14 天
     let now = chrono::Utc::now();
-    let expired_at = now + chrono::Duration::days(14);
+    let expired_at = if let Some(ref exp_str) = info.token_expired_at {
+        chrono::DateTime::parse_from_rfc3339(exp_str)
+            .ok()
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or(now + chrono::Duration::days(14))
+    } else {
+        now + chrono::Duration::days(14)
+    };
     let refresh_expired_at = now + chrono::Duration::days(180);
 
     // 构建 host URL

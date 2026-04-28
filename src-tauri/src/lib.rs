@@ -1487,6 +1487,7 @@ async fn handle_silent_start() -> anyhow::Result<()> {
                         avatar_url: account.avatar_url,
                         host: String::new(),
                         region: if account.region.is_empty() { "SG".to_string() } else { account.region },
+                        token_expired_at: account.token_expired_at.clone(),
                     };
                     let _ = machine::write_trae_login_info(&login_info);
                 }

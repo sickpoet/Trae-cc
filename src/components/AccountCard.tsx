@@ -11,6 +11,7 @@ interface AccountCardProps {
     created_at: number;
     is_current?: boolean;
     user_id?: string | null;
+    token_expired_at?: string | null;
   };
   usage: UsageSummary | null;
   selected: boolean;
@@ -62,7 +63,9 @@ export const AccountCard = memo(function AccountCard({ account, usage, selected,
   const usagePercent = totalLimit > 0 ? Math.round((totalUsed / totalLimit) * 100) : 0;
   const usageLevel = getUsageLevel(totalUsed, totalLimit);
 
-  const isTokenExpired = false; // TODO: 根据实际 token 过期时间判断
+  const isTokenExpired = account.token_expired_at
+    ? new Date(account.token_expired_at) < new Date()
+    : true; // 没有 token_expired_at 视为过期
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();

@@ -10,6 +10,7 @@ interface AccountListItemProps {
     avatar_url: string;
     plan_type: string;
     created_at: number;
+    token_expired_at?: string | null;
   };
   usage: UsageSummary | null;
   selected: boolean;
@@ -55,7 +56,9 @@ export const AccountListItem = memo(function AccountListItem({ account, usage, s
     return `${Math.floor(diffDays / 365)}年前`;
   };
 
-  const isTokenExpired = false; // TODO: 根据实际 token 过期时间判断
+  const isTokenExpired = account.token_expired_at
+    ? new Date(account.token_expired_at) < new Date()
+    : true; // 没有 token_expired_at 视为过期
 
   return (
     <div

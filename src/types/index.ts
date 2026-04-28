@@ -10,6 +10,7 @@ export interface AccountBrief {
   machine_id: string | null;
   is_current: boolean; // 是否是当前 Trae IDE 正在使用的账号
   user_id: string | null; // Trae 用户ID
+  token_expired_at?: string | null; // Token 过期时间（ISO 8601 格式）
 }
 
 // 完整账号信息

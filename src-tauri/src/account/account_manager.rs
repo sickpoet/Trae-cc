@@ -630,13 +630,8 @@ impl AccountManager {
                     token_result.token
                 }
                 Err(e) => {
-                    // 刷新失败，降级使用已有 Token（如果有）
-                    if let Some(existing_token) = &account.jwt_token {
-                        println!("[WARN] 切换前刷新 Token 失败（{}），使用已有 Token", e);
-                        existing_token.clone()
-                    } else {
-                        return Err(anyhow!("获取 Token 失败: {}", e));
-                    }
+                    // Cookie 可能已失效，直接报错，不静默降级使用旧 Token
+                    return Err(anyhow!("Token 刷新失败（{}），Cookies 可能已失效，请重新登录此账号", e));
                 }
             }
         } else if let Some(existing_token) = &account.jwt_token {
@@ -655,6 +650,7 @@ impl AccountManager {
             avatar_url: account.avatar_url.clone(),
             host: String::new(), // 根据 region 自动选择
             region: if account.region.is_empty() { "SG".to_string() } else { account.region.clone() },
+            token_expired_at: account.token_expired_at.clone(),
         };
 
         // 切换 Trae IDE 到该账号（清除旧登录状态并写入新账号信息，不自动启动）
@@ -761,6 +757,7 @@ impl AccountManager {
                                 avatar_url: account.avatar_url.clone(),
                                 host: String::new(),
                                 region: if account.region.is_empty() { "SG".to_string() } else { account.region.clone() },
+                                token_expired_at: Some(token_result.expired_at.clone()),
                             };
 
                             let _ = crate::machine::write_trae_login_info(&login_info);

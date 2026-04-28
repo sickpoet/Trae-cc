@@ -90,6 +90,9 @@ pub struct AccountBrief {
     pub is_current: bool,
     /// Trae 用户ID
     pub user_id: Option<String>,
+    /// Token 过期时间（ISO 8601 格式）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_expired_at: Option<String>,
 }
 
 impl From<&Account> for AccountBrief {
@@ -105,6 +108,7 @@ impl From<&Account> for AccountBrief {
             machine_id: account.machine_id.clone(),
             is_current: false, // 默认为 false，由 AccountManager 设置
             user_id: Some(account.user_id.clone()),
+            token_expired_at: account.token_expired_at.clone(),
         }
     }
 }
@@ -123,6 +127,7 @@ impl AccountBrief {
             machine_id: account.machine_id.clone(),
             is_current,
             user_id: Some(account.user_id.clone()),
+            token_expired_at: account.token_expired_at.clone(),
         }
     }
 }
