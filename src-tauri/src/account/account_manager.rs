@@ -617,7 +617,8 @@ impl AccountManager {
             .ok_or_else(|| anyhow!("账号不存在"))?
             .clone();
 
-        // 切换前先用 Cookies 刷新 Token（确保拿到最新有效的 Token）
+        // 切换前先刷新 Token
+        // 优先用 Cookies，Cookies 失效则用密码重新登录，都失败才报错
         let token = if !account.cookies.is_empty() {
             let mut cookie_client = TraeApiClient::new(&account.cookies)?;
             match cookie_client.get_user_token().await {
@@ -629,13 +630,16 @@ impl AccountManager {
                     self.save_store()?;
                     token_result.token
                 }
-                Err(e) => {
-                    // Cookie 可能已失效，直接报错，不静默降级使用旧 Token
-                    return Err(anyhow!("Token 刷新失败（{}），Cookies 可能已失效，请重新登录此账号", e));
+                Err(_) => {
+                    // Cookies 失效，尝试用密码重新登录
+                    self.try_refresh_with_password(&account).await?
                 }
             }
         } else if let Some(existing_token) = &account.jwt_token {
             existing_token.clone()
+        } else if let Some(ref password) = account.password {
+            // 没有 Cookies 也没有 Token，但有密码，尝试重新登录
+            self.try_refresh_with_password(&account).await?
         } else {
             return Err(anyhow!("账号没有有效的 Token 或 Cookies，无法切换"));
         };
@@ -667,6 +671,40 @@ impl AccountManager {
         self.save_store()?;
 
         Ok(())
+    }
+
+    /// 尝试用保存的密码重新登录，更新 Cookies/Token 并返回新 Token
+    async fn try_refresh_with_password(&mut self, account: &Account) -> Result<String> {
+        let password = account.password.as_ref()
+            .ok_or_else(|| anyhow!("Cookies 已失效且未保存密码，请重新登录此账号"))?;
+        let login_result = login_with_email(&account.email, password).await?;
+
+        // 用新 Cookies 再尝试获取 Token（login_with_email 返回的 token 可能过期）
+        let final_token = match TraeApiClient::new(&login_result.cookies)?.get_user_token().await {
+            Ok(token_result) => {
+                if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account.id) {
+                    acc.cookies = login_result.cookies.clone();
+                    acc.jwt_token = Some(token_result.token.clone());
+                    acc.token_expired_at = Some(token_result.expired_at.clone());
+                    acc.updated_at = chrono::Utc::now().timestamp();
+                }
+                self.save_store()?;
+                token_result.token
+            }
+            Err(_) => {
+                // 直接使用 login_with_email 返回的 token
+                if let Some(acc) = self.store.accounts.iter_mut().find(|a| a.id == account.id) {
+                    acc.cookies = login_result.cookies;
+                    acc.jwt_token = Some(login_result.token.clone());
+                    acc.token_expired_at = Some(login_result.expired_at);
+                    acc.updated_at = chrono::Utc::now().timestamp();
+                }
+                self.save_store()?;
+                login_result.token
+            }
+        };
+
+        Ok(final_token)
     }
 
     /// 绑定当前系统机器码到账号
