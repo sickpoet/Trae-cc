@@ -3,6 +3,7 @@ use uuid::Uuid;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use chrono::TimeZone;
 
 #[cfg(target_os = "windows")]
 use winreg::enums::*;
@@ -515,16 +516,10 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
     let obj = json.as_object_mut()
         .ok_or_else(|| anyhow!("storage.json 格式错误"))?;
 
-    // 计算过期时间：优先使用 Token 的真实过期时间，否则降级用 14 天
+    // 计算过期时间：直接使用 180 天后，避免 API 返回的格式不一致导致 Trae 认证异常
+    // Trae IDE 自身会根据 JWT 的 exp 字段校验，expiredAt 只是一个宽松的上限
     let now = chrono::Utc::now();
-    let expired_at = if let Some(ref exp_str) = info.token_expired_at {
-        chrono::DateTime::parse_from_rfc3339(exp_str)
-            .ok()
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or(now + chrono::Duration::days(14))
-    } else {
-        now + chrono::Duration::days(14)
-    };
+    let expired_at = now + chrono::Duration::days(180);
     let refresh_expired_at = now + chrono::Duration::days(180);
 
     // 构建 host URL
@@ -670,10 +665,16 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     // 3. 写入新的登录信息（追加 iCubeAuthInfo 和 iCubeEntitlementInfo）
     write_trae_login_info(info)?;
 
-    // 4. 清理 state.vscdb 中的旧认证缓存（精确删除，不删整个数据库）
+    // 4. 清理 state.vscdb（删除整个数据库，确保无残留旧认证缓存）
+    // Trae IDE 启动时会自动重建此数据库
     let state_db_path = trae_path.join("User").join("globalStorage").join("state.vscdb");
     if state_db_path.exists() {
-        let _ = cleanup_auth_from_vscdb(&state_db_path);
+        let _ = fs::remove_file(&state_db_path);
+        println!("[INFO] 已删除 state.vscdb");
+    }
+    let state_db_backup_path = trae_path.join("User").join("globalStorage").join("state.vscdb.backup");
+    if state_db_backup_path.exists() {
+        let _ = fs::remove_file(&state_db_backup_path);
     }
 
     // 5. 清除 Chromium Cookies（旧账号的 session cookie 会导致 JWT 与 session 不匹配）
@@ -685,6 +686,43 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     }
     if cookies_journal_path.exists() {
         let _ = fs::remove_file(&cookies_journal_path);
+    }
+
+    // 6. 清除 Local State（包含加密密钥，可能与旧账号绑定）
+    let local_state_path = trae_path.join("Local State");
+    if local_state_path.exists() {
+        let _ = fs::remove_file(&local_state_path);
+        println!("[INFO] 已删除 Local State");
+    }
+
+    // 7. 清除 Local Storage 中的认证相关数据
+    let local_storage_path = trae_path.join("Local Storage");
+    if local_storage_path.exists() {
+        let login_keys = ["auth", "login", "token", "session", "credential", "icube"];
+        if let Ok(entries) = fs::read_dir(&local_storage_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // leveldb 目录
+                    if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_lowercase()) {
+                        if login_keys.iter().any(|k| name.contains(k)) {
+                            let _ = fs::remove_dir_all(&path);
+                            println!("[INFO] 已清除登录相关的 Local Storage 目录: {}", name);
+                        }
+                    }
+                } else if let Some(ext) = path.extension() {
+                    if ext == "localstorage" {
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            let content_lower = content.to_lowercase();
+                            if login_keys.iter().any(|k| content_lower.contains(k)) {
+                                let _ = fs::remove_file(&path);
+                                println!("[INFO] 已清除登录相关的 Local Storage 文件");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     println!("[INFO] 已切换 Trae IDE 到账号: {}", info.email);
@@ -699,36 +737,6 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     Ok(())
 }
 
-/// 从 state.vscdb 中精确清理旧的认证相关缓存键，保留其他所有数据
-fn cleanup_auth_from_vscdb(db_path: &PathBuf) -> Result<()> {
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| anyhow!("无法打开 state.vscdb: {}", e))?;
-
-    // 只删除认证相关的历史缓存键，Trae IDE 会从 storage.json 重新读取
-    let auth_keys = [
-        "icube.auth.token",
-        "icube.auth.refreshToken",
-        "icube.auth.expiredAt",
-        "icube.auth.userId",
-        "icube.auth.host",
-        "icube.auth.region",
-        "icube.server.data",
-    ];
-
-    let mut deleted = 0;
-    for key in &auth_keys {
-        match conn.execute("DELETE FROM ItemTable WHERE key = ?1", [key]) {
-            Ok(n) => deleted += n,
-            Err(_) => {},
-        }
-    }
-
-    if deleted > 0 {
-        println!("[INFO] 已从 state.vscdb 清理 {} 条旧认证缓存", deleted);
-    }
-
-    Ok(())
-}
 
 /// 清除 Trae IDE 的登录状态（让 IDE 变成全新安装状态）
 pub fn clear_trae_login_state() -> Result<()> {
