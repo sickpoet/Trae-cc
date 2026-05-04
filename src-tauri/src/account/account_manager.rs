@@ -657,22 +657,19 @@ impl AccountManager {
             token_expired_at: account.token_expired_at.clone(),
         };
 
-        // 切换前将 live 聊天记录合并到目标账号备份（累积式：A→B→C 全保留）
-        if let Err(e) = crate::machine::merge_live_context_to_account(account_id) {
-            println!("[WARN] 合并聊天记录到目标账号失败: {}", e);
+        // 切换前备份当前账号的上下文（只备份，不恢复）
+        // switch_trae_account 不会动 workspaceStorage，聊天记录天然保留
+        // 恢复反而会用旧备份覆盖当前数据
+        if let Some(current_id) = self.store.current_account_id.clone() {
+            if current_id != account_id {
+                if let Err(e) = crate::machine::merge_live_context_to_account(&current_id) {
+                    println!("[WARN] 备份当前账号上下文失败: {}", e);
+                }
+            }
         }
 
         // 切换 Trae IDE 到该账号（清除旧登录状态并写入新账号信息，不自动启动）
         crate::machine::switch_trae_account(&login_info, account.machine_id.as_deref(), false)?;
-
-        // 切换后恢复目标账号的上下文
-        if crate::machine::has_account_context_backup(account_id) {
-            if let Err(e) = crate::machine::restore_account_context(account_id) {
-                println!("[WARN] 恢复目标账号上下文失败: {}", e);
-            } else {
-                println!("[INFO] 已恢复目标账号 {} 的上下文", account_id);
-            }
-        }
 
         // 如果账号有绑定的机器码，也更新系统机器码
         if let Some(machine_id) = &account.machine_id {
