@@ -1114,6 +1114,38 @@ pub fn delete_account_context_backup(account_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 将当前 Trae IDE 的 live workspaceStorage 合并到指定账号的备份中
+/// 用于切换前把实时聊天记录累积到目标账号
+pub fn merge_live_context_to_account(account_id: &str) -> Result<()> {
+    let proj_dirs = directories::ProjectDirs::from("com", "hhj", "trae-cc")
+        .ok_or_else(|| anyhow!("无法获取应用数据目录"))?;
+    let backup_dir = proj_dirs.data_dir().join("account_contexts").join(account_id);
+    let target_workspace = backup_dir.join("workspaceStorage");
+
+    fs::create_dir_all(&target_workspace)?;
+
+    let live_workspace = get_trae_workspace_storage_path()?;
+    if live_workspace.exists() {
+        match merge_workspace_storage(&live_workspace, &target_workspace) {
+            Ok(count) => {
+                println!("[INFO] 已合并 {} 个工作区到账号 {} 的备份", count, account_id);
+            }
+            Err(e) => {
+                println!("[WARN] 合并 live workspaceStorage 失败: {}", e);
+            }
+        }
+    }
+
+    // 同时备份 globalStorage（含 storage.json 等配置）
+    let global_src = get_trae_global_storage_path()?;
+    let global_dst = backup_dir.join("globalStorage");
+    if global_src.exists() {
+        copy_dir_all(&global_src, &global_dst)?;
+    }
+
+    Ok(())
+}
+
 /// 合并两个账号的对话记录到目标账号的备份中
 /// 这会将当前账号的 workspaceStorage 中的对话合并到目标账号的备份
 /// 注意：不合并 state.vscdb，因为它包含加密数据，与特定账号绑定

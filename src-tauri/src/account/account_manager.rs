@@ -657,15 +657,9 @@ impl AccountManager {
             token_expired_at: account.token_expired_at.clone(),
         };
 
-        // 切换前备份当前账号的上下文（聊天记录等）
-        if let Some(current_id) = self.store.current_account_id.clone() {
-            if current_id != account_id {
-                if let Err(e) = crate::machine::backup_account_context(&current_id) {
-                    println!("[WARN] 备份当前账号上下文失败: {}", e);
-                } else {
-                    println!("[INFO] 已备份当前账号 {} 的上下文", current_id);
-                }
-            }
+        // 切换前将 live 聊天记录合并到目标账号备份（累积式：A→B→C 全保留）
+        if let Err(e) = crate::machine::merge_live_context_to_account(account_id) {
+            println!("[WARN] 合并聊天记录到目标账号失败: {}", e);
         }
 
         // 切换 Trae IDE 到该账号（清除旧登录状态并写入新账号信息，不自动启动）
