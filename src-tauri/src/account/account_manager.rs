@@ -657,8 +657,28 @@ impl AccountManager {
             token_expired_at: account.token_expired_at.clone(),
         };
 
+        // 切换前备份当前账号的上下文（聊天记录等）
+        if let Some(current_id) = self.store.current_account_id.clone() {
+            if current_id != account_id {
+                if let Err(e) = crate::machine::backup_account_context(&current_id) {
+                    println!("[WARN] 备份当前账号上下文失败: {}", e);
+                } else {
+                    println!("[INFO] 已备份当前账号 {} 的上下文", current_id);
+                }
+            }
+        }
+
         // 切换 Trae IDE 到该账号（清除旧登录状态并写入新账号信息，不自动启动）
         crate::machine::switch_trae_account(&login_info, account.machine_id.as_deref(), false)?;
+
+        // 切换后恢复目标账号的上下文
+        if crate::machine::has_account_context_backup(account_id) {
+            if let Err(e) = crate::machine::restore_account_context(account_id) {
+                println!("[WARN] 恢复目标账号上下文失败: {}", e);
+            } else {
+                println!("[INFO] 已恢复目标账号 {} 的上下文", account_id);
+            }
+        }
 
         // 如果账号有绑定的机器码，也更新系统机器码
         if let Some(machine_id) = &account.machine_id {
