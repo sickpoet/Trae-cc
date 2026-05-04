@@ -665,16 +665,56 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
     // 3. 写入新的登录信息（追加 iCubeAuthInfo 和 iCubeEntitlementInfo）
     write_trae_login_info(info)?;
 
-    // 4. 清理 state.vscdb（删除整个数据库，确保无残留旧认证缓存）
-    // Trae IDE 启动时会自动重建此数据库
-    let state_db_path = trae_path.join("User").join("globalStorage").join("state.vscdb");
-    if state_db_path.exists() {
-        let _ = fs::remove_file(&state_db_path);
-        println!("[INFO] 已删除 state.vscdb");
-    }
-    let state_db_backup_path = trae_path.join("User").join("globalStorage").join("state.vscdb.backup");
-    if state_db_backup_path.exists() {
-        let _ = fs::remove_file(&state_db_backup_path);
+    // 4. 精确清理 state.vscdb 中的旧用户认证缓存（保留聊天记录）
+    {
+        use rusqlite::Connection;
+        let state_db_path = trae_path.join("User").join("globalStorage").join("state.vscdb");
+        if state_db_path.exists() {
+            match Connection::open(&state_db_path) {
+                Ok(conn) => {
+                    // 只删除当前用户的认证相关 key，不删聊天记录和 sessionRelation
+                    let auth_keys = [
+                        format!("{}{}", info.user_id, "_AI.agent.modeListMap"),
+                        format!("{}{}", info.user_id, "_AI.agent.model.model_list_map"),
+                        format!("{}{}", info.user_id, "_ai-chat:sessionRelation:globalModeMap"),
+                        format!("{}{}", info.user_id, "_ai-chat:sessionRelation:globalModelMap"),
+                        format!("{}{}", info.user_id, "_ai-chat:sessionRelation:migrationCompleted"),
+                        format!("{}{}", info.user_id, "_ai-chat:sessionRelation:modeMap"),
+                        format!("{}{}", info.user_id, "_ai-chat:sessionRelation:modelMap"),
+                        format!("{}{}", info.user_id, "_ai-chat:sessionRelation:planModeMap"),
+                        format!("{}{}", info.user_id, "_ai-chat:sessionRelation:specModeMap"),
+                        format!("currentAgentData_{}", info.user_id),
+                        format!("hasAutoNewSessionIn1020Version_{}", info.user_id),
+                        "storage.serviceMachineId".to_string(),
+                    ];
+                    for key in &auth_keys {
+                        let _ = conn.execute("DELETE FROM ItemTable WHERE key = ?1", rusqlite::params![key]);
+                    }
+                    println!("[INFO] 已精确清理 state.vscdb 中的认证缓存（保留聊天记录）");
+                }
+                Err(e) => {
+                    println!("[WARN] 无法打开 state.vscdb: {}，尝试删除重建", e);
+                    let _ = fs::remove_file(&state_db_path);
+                }
+            }
+        }
+        let state_db_backup_path = trae_path.join("User").join("globalStorage").join("state.vscdb.backup");
+        if state_db_backup_path.exists() {
+            // 同样精确清理备份
+            match Connection::open(&state_db_backup_path) {
+                Ok(conn) => {
+                    let auth_keys = [
+                        "storage.serviceMachineId".to_string(),
+                    ];
+                    for key in &auth_keys {
+                        let _ = conn.execute("DELETE FROM ItemTable WHERE key = ?1", rusqlite::params![key]);
+                    }
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&state_db_backup_path);
+                }
+            }
+        }
     }
 
     // 5. 清除 Chromium Cookies（旧账号的 session cookie 会导致 JWT 与 session 不匹配）
