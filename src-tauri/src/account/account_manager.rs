@@ -671,6 +671,12 @@ impl AccountManager {
         // 切换 Trae IDE 到该账号（清除旧登录状态并写入新账号信息，不自动启动）
         crate::machine::switch_trae_account(&login_info, account.machine_id.as_deref(), false)?;
 
+        // 为新用户复制 sessionRelation key，让 Trae 能关联到已有聊天记录
+        // workspace 的 state.vscdb 不会被 switch_trae_account 删除
+        if let Err(e) = crate::machine::copy_chat_session_relations_for_user(&account.user_id) {
+            println!("[WARN] 复制聊天 sessionRelation 失败: {}", e);
+        }
+
         // 如果账号有绑定的机器码，也更新系统机器码
         if let Some(machine_id) = &account.machine_id {
             let _ = crate::machine::set_machine_guid(machine_id);

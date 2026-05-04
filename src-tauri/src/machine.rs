@@ -1146,6 +1146,93 @@ pub fn merge_live_context_to_account(account_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 为新用户在所有 workspace 的 state.vscdb 中复制 sessionRelation key
+/// Trae 按 `{user_id}_ai-chat:sessionRelation:*` 查找聊天关联，新用户没有这些 key 就看不到记录
+pub fn copy_chat_session_relations_for_user(new_user_id: &str) -> Result<()> {
+    use rusqlite::Connection;
+
+    let workspace_path = get_trae_workspace_storage_path()?;
+    if !workspace_path.exists() {
+        return Ok(());
+    }
+
+    let mut total_copied = 0;
+
+    for entry in fs::read_dir(&workspace_path)? {
+        let entry = entry?;
+        let db_path = entry.path().join("state.vscdb");
+        if !db_path.exists() {
+            continue;
+        }
+
+        let conn = match Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // 找到所有已有的 sessionRelation key 和值
+        let rows: Vec<(String, String)> = match conn.prepare(
+            "SELECT key, value FROM ItemTable WHERE key LIKE '%_ai-chat:sessionRelation:%'"
+        ) {
+            Ok(mut stmt) => {
+                match stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    Ok(maps) => maps.filter_map(|r| r.ok()).collect(),
+                    Err(_) => vec![],
+                }
+            }
+            Err(_) => vec![],
+        };
+
+        if rows.is_empty() {
+            continue;
+        }
+
+        // 收集所有已有的用户 ID（从 key 前缀提取）
+        let mut existing_data: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (key, value) in &rows {
+            // key 格式: `{old_user_id}_ai-chat:sessionRelation:{type}`
+            if let Some(suffix_start) = key.find("_ai-chat:sessionRelation:") {
+                let suffix = &key[suffix_start..]; // `_ai-chat:sessionRelation:xxx`
+                let new_key = format!("{}{}", new_user_id, suffix);
+                if !existing_data.contains_key(&new_key) {
+                    existing_data.insert(new_key, value.clone());
+                }
+            }
+        }
+
+        if existing_data.is_empty() {
+            continue;
+        }
+
+        // 检查新用户是否已有 key，没有则写入
+        let new_user_prefix = format!("{}_", new_user_id);
+        let has_new_user = rows.iter().any(|(k, _)| k.starts_with(&new_user_prefix));
+
+        if has_new_user {
+            continue; // 新用户已有数据，跳过
+        }
+
+        for (new_key, value) in &existing_data {
+            if let Err(e) = conn.execute(
+                "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?1, ?2)",
+                rusqlite::params![new_key, value],
+            ) {
+                println!("[WARN] 写入 sessionRelation 失败: {}", e);
+            } else {
+                total_copied += 1;
+            }
+        }
+    }
+
+    if total_copied > 0 {
+        println!("[INFO] 已为用户 {} 复制 {} 条 sessionRelation", new_user_id, total_copied);
+    }
+
+    Ok(())
+}
+
 /// 合并两个账号的对话记录到目标账号的备份中
 /// 这会将当前账号的 workspaceStorage 中的对话合并到目标账号的备份
 /// 注意：不合并 state.vscdb，因为它包含加密数据，与特定账号绑定
