@@ -731,53 +731,10 @@ pub fn switch_trae_account(info: &TraeLoginInfo, machine_id: Option<&str>, auto_
         }
     }
 
-    // 5. 清除 Chromium Cookies（旧账号的 session cookie 会导致 JWT 与 session 不匹配）
-    let cookies_path = trae_path.join("Network").join("Cookies");
-    let cookies_journal_path = trae_path.join("Network").join("Cookies-journal");
-    if cookies_path.exists() {
-        let _ = fs::remove_file(&cookies_path);
-        println!("[INFO] 已清除 Cookies");
-    }
-    if cookies_journal_path.exists() {
-        let _ = fs::remove_file(&cookies_journal_path);
-    }
-
-    // 6. 清除 Local State（包含加密密钥，可能与旧账号绑定）
-    let local_state_path = trae_path.join("Local State");
-    if local_state_path.exists() {
-        let _ = fs::remove_file(&local_state_path);
-        println!("[INFO] 已删除 Local State");
-    }
-
-    // 7. 清除 Local Storage 中的认证相关数据
-    let local_storage_path = trae_path.join("Local Storage");
-    if local_storage_path.exists() {
-        let login_keys = ["auth", "login", "token", "session", "credential", "icube"];
-        if let Ok(entries) = fs::read_dir(&local_storage_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    // leveldb 目录
-                    if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_lowercase()) {
-                        if login_keys.iter().any(|k| name.contains(k)) {
-                            let _ = fs::remove_dir_all(&path);
-                            println!("[INFO] 已清除登录相关的 Local Storage 目录: {}", name);
-                        }
-                    }
-                } else if let Some(ext) = path.extension() {
-                    if ext == "localstorage" {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            let content_lower = content.to_lowercase();
-                            if login_keys.iter().any(|k| content_lower.contains(k)) {
-                                let _ = fs::remove_file(&path);
-                                println!("[INFO] 已清除登录相关的 Local Storage 文件");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // 5. 不清除 Cookies、Local State、Local Storage
+    // 这些数据包含了聊天记录的加密密钥和索引，删除会导致聊天记录丢失
+    // 新用户的 JWT token 会覆盖旧 session，Trae IDE 启动后会自动处理认证
+    println!("[INFO] 保留 Cookies/Local State/Local Storage，保护聊天记录")
 
     println!("[INFO] 已切换 Trae IDE 到账号: {}", info.email);
 
