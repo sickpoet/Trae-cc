@@ -547,14 +547,14 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
         &info.host
     };
 
-    // 构建 iCubeAuthInfo（userId 用旧账号的，token 用新账号的）
+    // 构建 iCubeAuthInfo
     let auth_info = serde_json::json!({
         "token": info.token,
         "refreshToken": info.refresh_token.clone().unwrap_or_default(),
         "expiredAt": expired_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         "refreshExpiredAt": refresh_expired_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         "tokenReleaseAt": now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
-        "userId": effective_user_id,
+        "userId": info.user_id,
         "host": host,
         "userRegion": {
             "region": info.region.to_uppercase(),
