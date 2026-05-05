@@ -516,6 +516,20 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
     let obj = json.as_object_mut()
         .ok_or_else(|| anyhow!("storage.json 格式错误"))?;
 
+    // 保留旧账号的 iCubeAuthInfo.userId，这样 Trae 会用旧 userId 加载本地聊天记录
+    // Trae API 服务端用 JWT token 做认证，本地用 iCubeAuthInfo.userId 做数据关联
+    let mut effective_user_id = info.user_id.clone();
+    if let Some(old_auth_str) = obj.get("iCubeAuthInfo://icube.cloudide").and_then(|v| v.as_str()) {
+        if let Ok(old_auth) = serde_json::from_str::<serde_json::Value>(old_auth_str) {
+            if let Some(old_uid) = old_auth.get("userId").and_then(|v| v.as_str()) {
+                if !old_uid.is_empty() && old_uid != info.user_id {
+                    effective_user_id = old_uid.to_string();
+                    println!("[INFO] 保留旧 userId {} 用于本地数据关联（新 userId: {}）", old_uid, info.user_id);
+                }
+            }
+        }
+    }
+
     // 计算过期时间：直接使用 180 天后，避免 API 返回的格式不一致导致 Trae 认证异常
     // Trae IDE 自身会根据 JWT 的 exp 字段校验，expiredAt 只是一个宽松的上限
     let now = chrono::Utc::now();
@@ -533,14 +547,14 @@ pub fn write_trae_login_info(info: &TraeLoginInfo) -> Result<()> {
         &info.host
     };
 
-    // 构建 iCubeAuthInfo
+    // 构建 iCubeAuthInfo（userId 用旧账号的，token 用新账号的）
     let auth_info = serde_json::json!({
         "token": info.token,
         "refreshToken": info.refresh_token.clone().unwrap_or_default(),
         "expiredAt": expired_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         "refreshExpiredAt": refresh_expired_at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
         "tokenReleaseAt": now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
-        "userId": info.user_id,
+        "userId": effective_user_id,
         "host": host,
         "userRegion": {
             "region": info.region.to_uppercase(),
